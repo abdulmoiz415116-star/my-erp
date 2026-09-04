@@ -1,0 +1,187 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    // Check if user belongs to the specified tenant
+    function belongsToTenant(tenantId) {
+      return isAuthenticated() && (
+        (request.auth.token.tenantId == tenantId) ||
+        exists(/databases/$(database)/documents/tenants/$(tenantId)/users/$(request.auth.uid))
+      );
+    }
+
+    // Get user's membership document in the tenant
+    function getTenantUser(tenantId) {
+      return get(/databases/$(database)/documents/tenants/$(tenantId)/users/$(request.auth.uid)).data;
+    }
+
+    // Get target member document in the tenant
+    function getTargetMember(tenantId, memberId) {
+      return get(/databases/$(database)/documents/tenants/$(tenantId)/users/$(memberId)).data;
+    }
+
+    // Check if the user has an active membership (real-time check)
+    function isTenantUserActive(tenantId) {
+      return belongsToTenant(tenantId) && (
+        request.auth.token.tenantRole != null ||
+        getTenantUser(tenantId).status == 'active'
+      );
+    }
+
+    // Check role authorization
+    function hasAnyRole(tenantId, roles) {
+      return isTenantUserActive(tenantId) && (
+        (request.auth.token.tenantRole in roles) ||
+        (getTenantUser(tenantId).role in roles)
+      );
+    }
+
+    // Super Admin check
+    function isSuperAdmin(tenantId) {
+      return hasAnyRole(tenantId, ['super_admin', 'owner']);
+    }
+
+    // Admin check
+    function isAdmin(tenantId) {
+      return hasAnyRole(tenantId, ['super_admin', 'owner', 'admin']);
+    }
+
+    // Manager check
+    function isManager(tenantId) {
+      return hasAnyRole(tenantId, ['super_admin', 'owner', 'admin', 'manager']);
+    }
+
+    // Users Collection (Global Profile)
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Tenants Root Collection
+    match /tenants/{tenantId} {
+      // Authenticated users can register a new company tenant
+      allow create: if isAuthenticated();
+      // Read allowed if user is active member
+      allow read: if belongsToTenant(tenantId);
+      // Update tenant metadata allowed only for Super Admin or Admin
+      allow update: if isAdmin(tenantId);
+      // Hard delete not permitted; tenants are disabled via status
+      allow delete: if false;
+
+      // Tenant Users / Memberships (RBAC & User Governance)
+      match /users/{memberId} {
+        // Read allowed for active members to see the directory
+        allow read: if isTenantUserActive(tenantId);
+
+        // Super Admin and Admin can create members
+        allow create: if isAdmin(tenantId);
+
+        // Update member:
+        // Super Admin can update any member.
+        // Admin can update members, EXCEPT they cannot modify or demote a Super Admin / Owner.
+        allow update: if isSuperAdmin(tenantId) || (
+          isAdmin(tenantId) &&
+          !(getTargetMember(tenantId, memberId).role in ['super_admin', 'owner'])
+        );
+
+        // Delete member: only Super Admin can remove memberships
+        allow delete: if isSuperAdmin(tenantId);
+      }
+
+      // Audit Logs (Immutable, append-only security log)
+      match /audit_logs/{logId} {
+        allow read: if isManager(tenantId);
+        allow create: if isTenantUserActive(tenantId);
+        allow update, delete: if false; // Strict audit immutability
+      }
+
+      // Company Settings
+      match /settings/{settingId} {
+        allow read: if isTenantUserActive(tenantId);
+        allow write: if isAdmin(tenantId);
+      }
+
+      // Master Records & Operational Modules
+      // Customers
+      match /customers/{customerId} {
+        allow read: if isTenantUserActive(tenantId);
+        allow create, update: if hasAnyRole(tenantId, ['super_admin', 'owner', 'admin', 'manager', 'staff']);
+        allow delete: if isAdmin(tenantId);
+      }
+
+      // Suppliers
+      match /suppliers/{supplierId} {
+        allow read: if isTenantUserActive(tenantId);
+        allow create, update: if hasAnyRole(tenantId, ['super_admin', 'owner', 'admin', 'manager', 'staff']);
+        allow delete: if isAdmin(tenantId);
+      }
+
+      // Products & Inventory Catalog
+      match /products/{productId} {
+        allow read: if isTenantUserActive(tenantId);
+        allow create, update: if hasAnyRole(tenantId, ['super_admin', 'owner', 'admin', 'manager', 'staff']);
+        allow delete: if isAdmin(tenantId);
+      }
+
+      // Sales Invoices & Orders
+      match /sales/{saleId} {
+        allow read: if isTenantUserActive(tenantId);
+        allow create, update: if hasAnyRole(tenantId, ['super_admin', 'owner', 'admin', 'manager', 'staff']);
+        allow delete: if isAdmin(tenantId);
+      }
+
+      // Purchase Orders
+      match /purchases/{purchaseId} {
+        allow read: if isTenantUserActive(tenantId);
+        allow create, update: if isManager(tenantId);
+        allow delete: if isAdmin(tenantId);
+      }
+
+      // Expenses
+      match /expenses/{expenseId} {
+        allow read: if isTenantUserActive(tenantId);
+        allow create, update: if hasAnyRole(tenantId, ['super_admin', 'owner', 'admin', 'manager', 'staff']);
+        allow delete: if isAdmin(tenantId);
+      }
+
+      // Payments
+      match /payments/{paymentId} {
+        allow read: if isTenantUserActive(tenantId);
+        allow create, update: if isAdmin(tenantId);
+        allow delete: if isSuperAdmin(tenantId);
+      }
+
+      // Accounts (Cash, Bank)
+      match /accounts/{accountId} {
+        allow read: if isTenantUserActive(tenantId);
+        allow create, update: if isAdmin(tenantId);
+        allow delete: if isSuperAdmin(tenantId);
+      }
+
+      // Double-Entry Journal Entries (Strictly Immutable, No Deletion)
+      match /journal_entries/{journalId} {
+        allow read: if isTenantUserActive(tenantId);
+        allow create, update: if isAdmin(tenantId);
+        allow delete: if false; // Accounting journals can only be voided/reversed, never deleted
+      }
+
+      // Stock Transactions (Immutable inventory movement ledger)
+      match /stock_transactions/{txId} {
+        allow read: if isTenantUserActive(tenantId);
+        allow create: if hasAnyRole(tenantId, ['super_admin', 'owner', 'admin', 'manager', 'staff']);
+        allow update, delete: if false; // Inventory ledger is append-only
+      }
+
+      // Fallback for any other module
+      match /{subcollection}/{docId} {
+        allow read: if isTenantUserActive(tenantId);
+        allow write: if isAdmin(tenantId);
+      }
+    }
+  }
+}

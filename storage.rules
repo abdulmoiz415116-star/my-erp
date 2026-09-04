@@ -1,0 +1,30 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isAuthenticated() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+    function isTenantUser(tenantId) {
+      return isAuthenticated() && (
+        request.auth.token.tenantId == tenantId ||
+        firestore.exists(/databases/(default)/documents/tenants/$(tenantId)/users/$(request.auth.uid))
+      );
+    }
+
+    // Tenant isolated assets (attachments, logos, invoices, receipts, product images)
+    match /tenants/{tenantId}/{allPaths=**} {
+      allow read: if isTenantUser(tenantId);
+      allow write: if isTenantUser(tenantId)
+                   && request.resource.size < 15 * 1024 * 1024; // 15MB limit
+    }
+
+    // User avatars
+    match /users/{userId}/{allPaths=**} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && request.auth.uid == userId
+                   && request.resource.size < 5 * 1024 * 1024; // 5MB limit
+    }
+  }
+}
