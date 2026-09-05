@@ -23,6 +23,7 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { formatCurrency, formatDate } from '@/lib/utils';
 import { printPaymentReceipt } from '@/lib/pdfPrint';
+import { generateNextPaymentNumber } from '@/lib/sequenceGenerator';
 import {
   Plus,
   CreditCard,
@@ -39,6 +40,7 @@ import {
   CheckCircle2,
   ArrowRightLeft,
   Eye,
+  Search,
 } from 'lucide-react';
 
 export default function PaymentsPage() {
@@ -100,6 +102,30 @@ export default function PaymentsPage() {
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank_transfer' | 'credit_card' | 'cheque'>('bank_transfer');
   const [reference, setReference] = useState('');
   const [notes, setNotes] = useState('');
+  const [partySearchQuery, setPartySearchQuery] = useState('');
+
+  const filteredParties = useMemo(() => {
+    const q = partySearchQuery.trim().toLowerCase();
+    if (partyType === 'customer') {
+      const activeCusts = customers.filter((c) => !c.isDeleted && c.status === 'active');
+      if (!q) return activeCusts;
+      return activeCusts.filter(
+        (c) =>
+          c.name.toLowerCase().includes(q) ||
+          c.code?.toLowerCase().includes(q) ||
+          c.phone?.toLowerCase().includes(q)
+      );
+    } else {
+      const activeSupps = suppliers.filter((s) => !s.isDeleted && s.status === 'active');
+      if (!q) return activeSupps;
+      return activeSupps.filter(
+        (s) =>
+          s.name.toLowerCase().includes(q) ||
+          s.code?.toLowerCase().includes(q) ||
+          s.phone?.toLowerCase().includes(q)
+      );
+    }
+  }, [partyType, customers, suppliers, partySearchQuery]);
 
   // Filtered Payments
   const filteredPayments = useMemo(() => {
@@ -225,7 +251,11 @@ export default function PaymentsPage() {
     try {
       const isReceipt = partyType === 'customer';
       const txType: PaymentTransactionType = isReceipt ? 'receipt' : 'payment';
-      const paymentNumber = `${isReceipt ? 'RCP' : 'PAY'}-${Date.now().toString().slice(-5)}`;
+      const paymentNumber = generateNextPaymentNumber(
+        payments.map((p) => p.paymentNumber),
+        txType,
+        1001
+      );
 
       let linkedInvNumber = '';
       let linkedPONumber = '';
@@ -723,10 +753,31 @@ export default function PaymentsPage() {
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                {partyType === 'customer' ? 'Customer *' : 'Supplier *'}
-              </label>
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <label className="block text-xs font-semibold text-slate-700">
+                  {partyType === 'customer' ? 'Customer *' : 'Supplier *'}
+                </label>
+                {partySearchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setPartySearchQuery('')}
+                    className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold"
+                  >
+                    Clear Filter
+                  </button>
+                )}
+              </div>
+              <div className="relative">
+                <input
+                  type="text"
+                  placeholder={`Search ${partyType === 'customer' ? 'customer' : 'supplier'} (Name, Code, Phone)...`}
+                  value={partySearchQuery}
+                  onChange={(e) => setPartySearchQuery(e.target.value)}
+                  className="w-full pl-7 pr-2 py-1.5 text-xs border border-slate-300 rounded-lg bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2 top-2" />
+              </div>
               <Select
                 value={selectedPartyId}
                 onChange={(e) => {
@@ -734,11 +785,13 @@ export default function PaymentsPage() {
                   setSelectedDocId('');
                 }}
                 required
-                options={
-                  partyType === 'customer'
-                    ? customers.map((c) => ({ label: `${c.name} (${c.code})`, value: c.id }))
-                    : suppliers.map((s) => ({ label: `${s.name} (${s.code})`, value: s.id }))
-                }
+                options={[
+                  { label: `-- Choose ${partyType === 'customer' ? 'Customer' : 'Supplier'} (${filteredParties.length}) --`, value: '' },
+                  ...filteredParties.map((p) => ({
+                    label: `${p.name} ${p.code ? `(${p.code})` : ''} ${p.phone ? `• ${p.phone}` : ''}`,
+                    value: p.id,
+                  })),
+                ]}
               />
             </div>
 

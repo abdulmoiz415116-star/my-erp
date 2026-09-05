@@ -9,21 +9,31 @@ import { formatCurrency, formatDate } from '@/lib/utils';
  */
 
 function triggerPrintHtml(htmlContent: string, docTitle: string) {
-  const iframe = document.createElement('iframe');
-  iframe.style.position = 'fixed';
-  iframe.style.right = '0';
-  iframe.style.bottom = '0';
-  iframe.style.width = '0';
-  iframe.style.height = '0';
-  iframe.style.border = '0';
-  iframe.name = docTitle;
-  document.body.appendChild(iframe);
+  try {
+    const existing = document.getElementById('erp-print-frame');
+    if (existing && existing.parentNode) {
+      existing.parentNode.removeChild(existing);
+    }
 
-  const doc = iframe.contentWindow?.document;
-  if (!doc) return;
+    const iframe = document.createElement('iframe');
+    iframe.id = 'erp-print-frame';
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.name = docTitle;
+    document.body.appendChild(iframe);
 
-  doc.open();
-  doc.write(`
+    const doc = iframe.contentWindow?.document;
+    if (!doc) {
+      triggerPopupPrintFallback(htmlContent, docTitle);
+      return;
+    }
+
+    doc.open();
+    doc.write(`
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -260,18 +270,82 @@ function triggerPrintHtml(htmlContent: string, docTitle: string) {
     </head>
     <body>
       ${htmlContent}
+      <script>
+        window.onload = function() {
+          setTimeout(function() {
+            window.focus();
+            try {
+              window.print();
+            } catch(e) {
+              console.error("Print error inside iframe:", e);
+            }
+          }, 300);
+        };
+        window.onafterprint = function() {
+          try {
+            if (window.parent && window.parent.document) {
+              var el = window.parent.document.getElementById('erp-print-frame');
+              if (el && el.parentNode) {
+                el.parentNode.removeChild(el);
+              }
+            }
+          } catch(e) {}
+        };
+      </script>
     </body>
     </html>
   `);
-  doc.close();
+    doc.close();
 
-  iframe.contentWindow?.focus();
-  setTimeout(() => {
-    iframe.contentWindow?.print();
+    // Safety timeout: keep alive for 60 seconds (never abort spooling early)
     setTimeout(() => {
-      document.body.removeChild(iframe);
-    }, 1000);
-  }, 350);
+      if (iframe && iframe.parentNode) {
+        iframe.parentNode.removeChild(iframe);
+      }
+    }, 60000);
+  } catch (err) {
+    console.warn("Iframe printing failed, using popup fallback:", err);
+    triggerPopupPrintFallback(htmlContent, docTitle);
+  }
+}
+
+function triggerPopupPrintFallback(htmlContent: string, docTitle: string) {
+  const win = window.open('', '_blank', 'width=950,height=850,menubar=no,toolbar=no,location=no,status=no');
+  if (!win) {
+    alert('Please allow popups to preview and print documents.');
+    return;
+  }
+  win.document.write(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>${docTitle}</title>
+        <style>
+          @page { size: A4 portrait; margin: 15mm; }
+          * { box-sizing: border-box; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+          body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 12px; color: #0f172a; margin: 0; padding: 20px; }
+          table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
+          th { background: #f1f5f9; padding: 8px; border-bottom: 1px solid #cbd5e1; text-align: left; }
+          td { padding: 8px; border-bottom: 1px solid #e2e8f0; }
+          .text-right { text-align: right; }
+          .text-center { text-align: center; }
+          .font-mono { font-family: monospace; }
+          .font-bold { font-weight: bold; }
+        </style>
+      </head>
+      <body>
+        ${htmlContent}
+        <script>
+          window.onload = function() {
+            window.focus();
+            window.print();
+          };
+        </script>
+      </body>
+    </html>
+  `);
+  win.document.close();
 }
 
 /**
@@ -297,19 +371,19 @@ export function printCommercialInvoice(invoice: SaleInvoice, tenant: Tenant | nu
     statusBadge = '<span class="stamp-unpaid">PAYMENT DUE</span>';
   }
 
-  const itemsRows = invoice.items
+  const itemsRows = (invoice.items || [])
     .map(
       (item, idx) => `
       <tr>
         <td class="text-center font-mono">${idx + 1}</td>
         <td>
-          <div class="font-bold">${item.productName}</div>
-          <div style="font-size: 10px; color: #64748b; font-family: monospace;">SKU: ${item.sku}</div>
+          <div class="font-bold">${item.productName || 'Item'}</div>
+          <div style="font-size: 10px; color: #64748b; font-family: monospace;">SKU: ${item.sku || '—'}</div>
         </td>
-        <td class="text-center font-mono">${item.quantity}</td>
-        <td class="text-right font-mono">${formatCurrency(item.unitPrice, currencyCode, currencySymbol)}</td>
-        <td class="text-right font-mono">${item.taxRate}%</td>
-        <td class="text-right font-mono font-bold">${formatCurrency(item.total, currencyCode, currencySymbol)}</td>
+        <td class="text-center font-mono">${item.quantity || 0}</td>
+        <td class="text-right font-mono">${formatCurrency(item.unitPrice || 0, currencyCode, currencySymbol)}</td>
+        <td class="text-right font-mono">${item.taxRate || 0}%</td>
+        <td class="text-right font-mono font-bold">${formatCurrency(item.total || ((item.quantity || 0) * (item.unitPrice || 0)), currencyCode, currencySymbol)}</td>
       </tr>
     `
     )
@@ -320,11 +394,11 @@ export function printCommercialInvoice(invoice: SaleInvoice, tenant: Tenant | nu
       <div>
         <h1 class="company-name">${companyName}</h1>
         <p class="company-sub">${tenant?.address?.street || '100 Enterprise Way'}, ${tenant?.address?.city || 'Austin'}, ${tenant?.address?.state || 'TX'}</p>
-        <p class="company-sub">Tax ID: ${tenant?.settings.taxNumber || 'US-892374619'} • Email: ${tenant?.email || 'billing@apex-corp.com'}</p>
+        <p class="company-sub">Tax ID: ${tenant?.settings?.taxNumber || 'US-892374619'} • Email: ${tenant?.email || 'billing@apex-corp.com'}</p>
       </div>
       <div class="doc-title-badge">
         <h2 class="doc-title">TAX INVOICE</h2>
-        <p class="doc-ref">${invoice.invoiceNumber}</p>
+        <p class="doc-ref">${invoice.invoiceNumber || 'INV-0000'}</p>
         <div style="margin-top: 8px;">${statusBadge}</div>
       </div>
     </div>
@@ -332,13 +406,13 @@ export function printCommercialInvoice(invoice: SaleInvoice, tenant: Tenant | nu
     <div class="meta-grid">
       <div class="meta-col">
         <h4>BILLED TO:</h4>
-        <p class="party-name">${invoice.customerName}</p>
-        <p>Customer ID: ${invoice.customerId}</p>
+        <p class="party-name">${invoice.customerName || 'Cash Customer'}</p>
+        <p>Customer ID: ${invoice.customerId || '—'}</p>
       </div>
       <div class="meta-col text-right">
         <h4>INVOICE DETAILS:</h4>
-        <p><strong>Invoice Date:</strong> ${formatDate(invoice.date)}</p>
-        <p><strong>Due Date:</strong> ${formatDate(invoice.dueDate || invoice.date)}</p>
+        <p><strong>Invoice Date:</strong> ${formatDate(invoice.date || invoice.createdAt)}</p>
+        <p><strong>Due Date:</strong> ${formatDate(invoice.dueDate || invoice.date || invoice.createdAt)}</p>
       </div>
     </div>
 
@@ -354,7 +428,7 @@ export function printCommercialInvoice(invoice: SaleInvoice, tenant: Tenant | nu
         </tr>
       </thead>
       <tbody>
-        ${itemsRows}
+        ${itemsRows.length > 0 ? itemsRows : '<tr><td colspan="6" class="text-center" style="padding: 12px; color: #94a3b8;">No line items found.</td></tr>'}
       </tbody>
     </table>
 
@@ -362,28 +436,28 @@ export function printCommercialInvoice(invoice: SaleInvoice, tenant: Tenant | nu
       <div class="totals-box">
         <div class="totals-row">
           <span>Subtotal:</span>
-          <span class="font-mono">${formatCurrency(invoice.subtotal, currencyCode, currencySymbol)}</span>
+          <span class="font-mono">${formatCurrency(invoice.subtotal || 0, currencyCode, currencySymbol)}</span>
         </div>
         <div class="totals-row">
           <span>Sales Tax / VAT:</span>
-          <span class="font-mono">${formatCurrency(invoice.taxAmount, currencyCode, currencySymbol)}</span>
+          <span class="font-mono">${formatCurrency(invoice.taxAmount || 0, currencyCode, currencySymbol)}</span>
         </div>
         ${
-          invoice.discountAmount > 0
-            ? `<div class="totals-row"><span>Discount:</span><span class="font-mono">-${formatCurrency(invoice.discountAmount, currencyCode, currencySymbol)}</span></div>`
+          (invoice.discountAmount || 0) > 0
+            ? `<div class="totals-row"><span>Discount:</span><span class="font-mono">-${formatCurrency(invoice.discountAmount || 0, currencyCode, currencySymbol)}</span></div>`
             : ''
         }
         <div class="totals-row grand-total">
           <span>Grand Total:</span>
-          <span class="font-mono">${formatCurrency(invoice.totalAmount, currencyCode, currencySymbol)}</span>
+          <span class="font-mono">${formatCurrency(invoice.totalAmount || 0, currencyCode, currencySymbol)}</span>
         </div>
         <div class="totals-row" style="color: #059669; font-weight: 600;">
           <span>Paid to Date:</span>
-          <span class="font-mono">${formatCurrency(invoice.paidAmount, currencyCode, currencySymbol)}</span>
+          <span class="font-mono">${formatCurrency(invoice.paidAmount || 0, currencyCode, currencySymbol)}</span>
         </div>
         <div class="totals-row" style="color: #dc2626; font-weight: bold; border-top: 1px dashed #cbd5e1; margin-top: 4px; padding-top: 4px;">
           <span>Balance Due:</span>
-          <span class="font-mono">${formatCurrency(invoice.balanceAmount, currencyCode, currencySymbol)}</span>
+          <span class="font-mono">${formatCurrency(invoice.balanceAmount || 0, currencyCode, currencySymbol)}</span>
         </div>
       </div>
     </div>
@@ -418,19 +492,19 @@ export function printCommercialPurchaseOrder(po: PurchaseOrder, tenant: Tenant |
   const currencySymbol = tenant?.settings.currencySymbol || '$';
   const companyName = tenant?.legalName || tenant?.name || 'Enterprise Resource Planning';
 
-  const itemsRows = po.items
+  const itemsRows = (po.items || [])
     .map(
       (item, idx) => `
       <tr>
         <td class="text-center font-mono">${idx + 1}</td>
         <td>
-          <div class="font-bold">${item.productName}</div>
-          <div style="font-size: 10px; color: #64748b; font-family: monospace;">SKU: ${item.sku}</div>
+          <div class="font-bold">${item.productName || 'Item'}</div>
+          <div style="font-size: 10px; color: #64748b; font-family: monospace;">SKU: ${item.sku || '—'}</div>
         </td>
-        <td class="text-center font-mono">${item.quantity}</td>
-        <td class="text-right font-mono">${formatCurrency(item.unitCost, currencyCode, currencySymbol)}</td>
-        <td class="text-right font-mono">${item.taxRate}%</td>
-        <td class="text-right font-mono font-bold">${formatCurrency(item.total, currencyCode, currencySymbol)}</td>
+        <td class="text-center font-mono">${item.quantity || 0}</td>
+        <td class="text-right font-mono">${formatCurrency(item.unitCost || 0, currencyCode, currencySymbol)}</td>
+        <td class="text-right font-mono">${item.taxRate || 0}%</td>
+        <td class="text-right font-mono font-bold">${formatCurrency(item.total || ((item.quantity || 0) * (item.unitCost || 0)), currencyCode, currencySymbol)}</td>
       </tr>
     `
     )
@@ -463,9 +537,9 @@ export function printCommercialPurchaseOrder(po: PurchaseOrder, tenant: Tenant |
       </div>
       <div class="doc-title-badge">
         <h2 class="doc-title" style="color: #0f766e;">PURCHASE ORDER</h2>
-        <p class="doc-ref">${po.poNumber}</p>
+        <p class="doc-ref">${po.poNumber || 'PO-0000'}</p>
         <div style="margin-top: 8px; font-size: 11px; text-transform: uppercase; font-weight: bold; color: #475569;">
-          Receipt: <strong>${po.receiptStatus}</strong> | Payment: <strong>${po.paymentStatus}</strong>
+          Receipt: <strong>${po.receiptStatus || 'pending'}</strong> | Payment: <strong>${po.paymentStatus || 'unpaid'}</strong>
         </div>
       </div>
     </div>
@@ -473,13 +547,13 @@ export function printCommercialPurchaseOrder(po: PurchaseOrder, tenant: Tenant |
     <div class="meta-grid">
       <div class="meta-col">
         <h4>VENDOR / SUPPLIER:</h4>
-        <p class="party-name">${po.supplierName}</p>
-        <p>Supplier ID: ${po.supplierId}</p>
+        <p class="party-name">${po.supplierName || 'General Supplier'}</p>
+        <p>Supplier ID: ${po.supplierId || '—'}</p>
       </div>
       <div class="meta-col text-right">
         <h4>ORDER DETAILS:</h4>
-        <p><strong>PO Date:</strong> ${formatDate(po.date)}</p>
-        <p><strong>Required Delivery:</strong> ${formatDate(po.dueDate || po.date)}</p>
+        <p><strong>PO Date:</strong> ${formatDate(po.date || po.createdAt)}</p>
+        <p><strong>Required Delivery:</strong> ${formatDate(po.dueDate || po.date || po.createdAt)}</p>
       </div>
     </div>
 
@@ -495,7 +569,7 @@ export function printCommercialPurchaseOrder(po: PurchaseOrder, tenant: Tenant |
         </tr>
       </thead>
       <tbody>
-        ${itemsRows}
+        ${itemsRows.length > 0 ? itemsRows : '<tr><td colspan="6" class="text-center" style="padding: 12px; color: #94a3b8;">No line items found.</td></tr>'}
       </tbody>
     </table>
 
@@ -503,7 +577,7 @@ export function printCommercialPurchaseOrder(po: PurchaseOrder, tenant: Tenant |
       <div class="totals-box">
         <div class="totals-row">
           <span>Subtotal:</span>
-          <span class="font-mono">${formatCurrency(po.subtotal, currencyCode, currencySymbol)}</span>
+          <span class="font-mono">${formatCurrency(po.subtotal || 0, currencyCode, currencySymbol)}</span>
         </div>
         ${
           (po.discountAmount || 0) > 0
@@ -512,19 +586,19 @@ export function printCommercialPurchaseOrder(po: PurchaseOrder, tenant: Tenant |
         }
         <div class="totals-row">
           <span>Tax:</span>
-          <span class="font-mono">${formatCurrency(po.taxAmount, currencyCode, currencySymbol)}</span>
+          <span class="font-mono">${formatCurrency(po.taxAmount || 0, currencyCode, currencySymbol)}</span>
         </div>
         <div class="totals-row grand-total">
           <span>Total Purchase Order:</span>
-          <span class="font-mono">${formatCurrency(po.totalAmount, currencyCode, currencySymbol)}</span>
+          <span class="font-mono">${formatCurrency(po.totalAmount || 0, currencyCode, currencySymbol)}</span>
         </div>
         <div class="totals-row" style="color: #059669;">
           <span>Paid Upfront:</span>
-          <span class="font-mono">${formatCurrency(po.paidAmount, currencyCode, currencySymbol)}</span>
+          <span class="font-mono">${formatCurrency(po.paidAmount || 0, currencyCode, currencySymbol)}</span>
         </div>
         <div class="totals-row" style="color: #b45309; font-weight: bold; border-top: 1px dashed #cbd5e1; margin-top: 4px; padding-top: 4px;">
           <span>Accounts Payable Due:</span>
-          <span class="font-mono">${formatCurrency(po.balanceAmount, currencyCode, currencySymbol)}</span>
+          <span class="font-mono">${formatCurrency(po.balanceAmount || 0, currencyCode, currencySymbol)}</span>
         </div>
       </div>
     </div>
@@ -778,21 +852,28 @@ export function printProductStockCard(product: Product, entries: StockLedgerEntr
  * 80mm Thermal POS Receipt Printing
  */
 function triggerThermalPrintHtml(htmlContent: string, docTitle: string) {
-  const iframe = document.createElement('iframe');
-  iframe.style.position = 'fixed';
-  iframe.style.right = '0';
-  iframe.style.bottom = '0';
-  iframe.style.width = '0';
-  iframe.style.height = '0';
-  iframe.style.border = '0';
-  iframe.name = docTitle;
-  document.body.appendChild(iframe);
+  try {
+    const existing = document.getElementById('erp-thermal-frame');
+    if (existing && existing.parentNode) {
+      existing.parentNode.removeChild(existing);
+    }
 
-  const doc = iframe.contentWindow?.document;
-  if (!doc) return;
+    const iframe = document.createElement('iframe');
+    iframe.id = 'erp-thermal-frame';
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    iframe.name = docTitle;
+    document.body.appendChild(iframe);
 
-  doc.open();
-  doc.write(`
+    const doc = iframe.contentWindow?.document;
+    if (!doc) return;
+
+    doc.open();
+    doc.write(`
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -846,20 +927,35 @@ function triggerThermalPrintHtml(htmlContent: string, docTitle: string) {
         window.onload = function() {
           setTimeout(function() {
             window.focus();
-            window.print();
+            try {
+              window.print();
+            } catch(e) {}
           }, 250);
+        };
+        window.onafterprint = function() {
+          try {
+            if (window.parent && window.parent.document) {
+              var el = window.parent.document.getElementById('erp-thermal-frame');
+              if (el && el.parentNode) {
+                el.parentNode.removeChild(el);
+              }
+            }
+          } catch(e) {}
         };
       </script>
     </body>
     </html>
   `);
-  doc.close();
+    doc.close();
 
-  setTimeout(() => {
-    if (iframe.parentNode) {
-      document.body.removeChild(iframe);
-    }
-  }, 60000);
+    setTimeout(() => {
+      if (iframe.parentNode) {
+        document.body.removeChild(iframe);
+      }
+    }, 60000);
+  } catch (e) {
+    console.error("Thermal print error:", e);
+  }
 }
 
 export function printThermalReceipt(
@@ -1563,6 +1659,274 @@ export function printProfitAndLossStatement(pnl: ProfitLossStatement, tenant?: T
   `;
 
   triggerPrintHtml(html, `IncomeStatement-${Date.now()}`);
+}
+
+/**
+ * 13. Universal Analytical Report Document Printing Engine
+ */
+export interface ReportColumn {
+  header: string;
+  key: string;
+  align?: 'left' | 'center' | 'right';
+  format?: 'text' | 'currency' | 'number' | 'date';
+}
+
+export interface ReportSummaryMetric {
+  label: string;
+  value: string | number;
+  isCurrency?: boolean;
+}
+
+export interface ReportPrintOptions {
+  title: string;
+  subtitle?: string;
+  dateRange?: string;
+  columns: ReportColumn[];
+  rows: Record<string, any>[];
+  summaryMetrics?: ReportSummaryMetric[];
+  tenant?: Tenant | null;
+}
+
+export function printReportDocument(options: ReportPrintOptions) {
+  const { title, subtitle, dateRange, columns, rows, summaryMetrics, tenant } = options;
+  const companyName = tenant?.name || tenant?.legalName || 'Enterprise Resource Planning';
+  const currencyCode = tenant?.settings.currency || 'USD';
+  const currencySymbol = tenant?.settings.currencySymbol || '$';
+
+  const metricsHtml =
+    summaryMetrics && summaryMetrics.length > 0
+      ? `
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 20px;">
+      ${summaryMetrics
+        .map(
+          (m) => `
+        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 12px;">
+          <div style="font-size: 10px; text-transform: uppercase; color: #64748b; font-weight: bold; margin-bottom: 4px;">${m.label}</div>
+          <div style="font-size: 14px; font-weight: 800; color: #0f172a; font-family: monospace;">
+            ${typeof m.value === 'number' && m.isCurrency ? formatCurrency(m.value, currencyCode, currencySymbol) : m.value}
+          </div>
+        </div>
+      `
+        )
+        .join('')}
+    </div>
+  `
+      : '';
+
+  const tableHeaderHtml = columns
+    .map(
+      (c) => `
+    <th class="${c.align === 'right' ? 'text-right' : c.align === 'center' ? 'text-center' : ''}">${c.header}</th>
+  `
+    )
+    .join('');
+
+  const tableRowsHtml =
+    rows.length === 0
+      ? `<tr><td colspan="${columns.length}" class="text-center" style="padding: 24px; color: #94a3b8;">No records found for this period.</td></tr>`
+      : rows
+          .map(
+            (row, idx) => `
+    <tr style="background: ${idx % 2 === 0 ? '#ffffff' : '#fafafa'};">
+      ${columns
+        .map((c) => {
+          let val = row[c.key];
+          if (val === undefined || val === null) val = '-';
+          let displayVal = val;
+          if (c.format === 'currency' && typeof val === 'number') {
+            displayVal = formatCurrency(val, currencyCode, currencySymbol);
+          } else if (c.format === 'date' && typeof val === 'string') {
+            displayVal = formatDate(val);
+          } else if (c.format === 'number' && typeof val === 'number') {
+            displayVal = val.toLocaleString();
+          }
+          return `<td class="${c.align === 'right' ? 'text-right font-mono' : c.align === 'center' ? 'text-center' : ''}">${displayVal}</td>`;
+        })
+        .join('')}
+    </tr>
+  `
+          )
+          .join('');
+
+  const html = `
+    <div class="header">
+      <div>
+        <h1 class="company-name">${companyName}</h1>
+        <p class="company-sub">${subtitle || 'Commercial Operations & Intelligence Report'}</p>
+        <div style="font-size: 11px; color: #64748b; margin-top: 4px;">
+          Filter Period: <strong>${dateRange || 'All Historical Records'}</strong> &bull; Total Filtered Records: <strong>${rows.length}</strong>
+        </div>
+      </div>
+      <div class="doc-title-badge">
+        <h2 class="doc-title" style="font-size: 18px;">${title}</h2>
+        <div class="doc-ref">Generated: ${new Date().toLocaleDateString()}</div>
+      </div>
+    </div>
+
+    ${metricsHtml}
+
+    <table style="width: 100%; border-collapse: collapse; margin-bottom: 24px;">
+      <thead>
+        <tr>
+          ${tableHeaderHtml}
+        </tr>
+      </thead>
+      <tbody>
+        ${tableRowsHtml}
+      </tbody>
+    </table>
+
+    <div class="footer">
+      <div>Enterprise Analytical Export &bull; Generated confidentially by ERP System</div>
+      <div class="signature-box">Finance Controller</div>
+    </div>
+  `;
+
+  triggerPrintHtml(html, `${title.replace(/\s+/g, '_')}-${Date.now()}`);
+}
+
+/**
+ * 14. Universal Barcode & Shelf Label Printing Engine
+ */
+export interface BarcodePrintItem {
+  name: string;
+  sku: string;
+  barcode?: string;
+  sellingPrice: number;
+  category?: string;
+  unit?: string;
+  quantity?: number;
+}
+
+export function printBarcodeLabels(items: BarcodePrintItem[], tenant?: Tenant | null) {
+  const companyName = tenant?.name || tenant?.legalName || 'RETAIL STORE';
+  const currencyCode = tenant?.settings.currency || 'USD';
+  const currencySymbol = tenant?.settings.currencySymbol || '$';
+
+  const labelsToRender: BarcodePrintItem[] = [];
+  items.forEach((it) => {
+    const qty = Math.max(1, it.quantity || 1);
+    for (let i = 0; i < qty; i++) {
+      labelsToRender.push(it);
+    }
+  });
+
+  const cardsHtml = labelsToRender
+    .map((item) => {
+      const code = item.barcode || item.sku;
+      return `
+      <div class="barcode-sticker">
+        <div class="sticker-company">${companyName}</div>
+        <div class="sticker-name">${item.name}</div>
+        <div class="sticker-category">${item.category || item.unit || 'Inventory'}</div>
+        <div class="barcode-visual">
+          <div class="barcode-bars">
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+          </div>
+          <div class="barcode-text">*${code}*</div>
+        </div>
+        <div class="sticker-price">
+          ${formatCurrency(item.sellingPrice, currencyCode, currencySymbol)}
+        </div>
+      </div>
+    `;
+    })
+    .join('');
+
+  const html = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+      <style>
+        .labels-grid {
+          display: grid;
+          grid-template-columns: repeat(4, 1fr);
+          gap: 6mm;
+        }
+        .barcode-sticker {
+          width: 100%;
+          border: 1px dashed #94a3b8;
+          border-radius: 4px;
+          padding: 6px 8px;
+          text-align: center;
+          background: #ffffff;
+          page-break-inside: avoid;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: space-between;
+          height: 38mm;
+        }
+        .sticker-company {
+          font-size: 8px;
+          font-weight: 700;
+          text-transform: uppercase;
+          color: #64748b;
+          letter-spacing: 0.5px;
+        }
+        .sticker-name {
+          font-size: 10px;
+          font-weight: 800;
+          color: #0f172a;
+          line-height: 1.2;
+          max-height: 24px;
+          overflow: hidden;
+          margin: 2px 0;
+        }
+        .sticker-category {
+          font-size: 8px;
+          color: #64748b;
+        }
+        .barcode-visual {
+          margin: 3px 0;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+        }
+        .barcode-bars {
+          display: flex;
+          align-items: flex-end;
+          gap: 1.5px;
+          height: 20px;
+        }
+        .barcode-bars span {
+          width: 1.5px;
+          height: 100%;
+          background: #000;
+        }
+        .barcode-bars span:nth-child(2n) {
+          width: 3px;
+        }
+        .barcode-bars span:nth-child(3n) {
+          height: 85%;
+        }
+        .barcode-bars span:nth-child(5n) {
+          width: 1px;
+        }
+        .barcode-text {
+          font-family: monospace;
+          font-size: 9px;
+          font-weight: bold;
+          letter-spacing: 2px;
+          color: #0f172a;
+          margin-top: 1px;
+        }
+        .sticker-price {
+          font-size: 12px;
+          font-weight: 900;
+          color: #047857;
+          border-top: 1px solid #e2e8f0;
+          width: 100%;
+          padding-top: 2px;
+        }
+      </style>
+      <div class="labels-grid">
+        ${cardsHtml}
+      </div>
+    </div>
+  `;
+
+  triggerPrintHtml(html, `BarcodeLabels-${Date.now()}`);
 }
 
 

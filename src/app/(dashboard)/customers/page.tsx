@@ -12,9 +12,10 @@ import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { formatCurrency, formatDate } from '@/lib/utils';
-import { Plus, Users, Mail, Phone, MapPin, Building, CreditCard, AlertCircle } from 'lucide-react';
+import { Plus, Users, Mail, Phone, MapPin, Building, CreditCard, AlertCircle, Search, Eye } from 'lucide-react';
 import { CustomerDetailModal } from '@/components/customers/CustomerDetailModal';
 import { useToast } from '@/context/ToastContext';
+import { generateNextCustomerCode } from '@/lib/sequenceGenerator';
 
 export default function CustomersPage() {
   const { currentTenant } = useTenant();
@@ -100,10 +101,27 @@ export default function CustomersPage() {
     });
   }, [customers, sales, payments]);
 
+  // Top Customer Lookup Search State
+  const [topLookupQuery, setTopLookupQuery] = useState('');
+
+  const topLookupMatches = useMemo(() => {
+    const q = topLookupQuery.trim().toLowerCase();
+    if (!q) return [];
+    return customersWithCalculatedBalances.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        c.code?.toLowerCase().includes(q) ||
+        c.phone?.toLowerCase().includes(q) ||
+        c.email?.toLowerCase().includes(q) ||
+        c.companyName?.toLowerCase().includes(q)
+    );
+  }, [customersWithCalculatedBalances, topLookupQuery]);
+
   const openCreateModal = () => {
     setEditingCustomer(null);
     setName('');
-    setCode(`CUST-${Math.floor(100 + Math.random() * 900)}`);
+    const nextCode = generateNextCustomerCode(customers.map((c) => c.code));
+    setCode(nextCode);
     setCompanyName('');
     setEmail('');
     setPhone('');
@@ -441,6 +459,113 @@ export default function CustomersPage() {
           </Button>
         }
       />
+
+      {/* QUICK CUSTOMER DATA & LEDGER LOOKUP BAR */}
+      <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-xs space-y-2">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg">
+              <Search className="w-4 h-4" />
+            </div>
+            <div>
+              <h3 className="text-xs font-bold text-slate-900">Quick Customer Search & Ledger Lookup</h3>
+              <p className="text-[11px] text-slate-500">Type any customer name, phone, or code to immediately inspect their balance, ledger statement & invoices</p>
+            </div>
+          </div>
+          {topLookupQuery && (
+            <button
+              type="button"
+              onClick={() => {
+                setTopLookupQuery('');
+                setSearchQuery('');
+              }}
+              className="text-xs text-slate-500 hover:text-slate-800 font-semibold"
+            >
+              Clear Search (✕)
+            </button>
+          )}
+        </div>
+
+        <div className="relative">
+          <Search className="w-4 h-4 text-indigo-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            placeholder="Type customer name, phone number, or code (e.g. Ali, 0300..., CUST-1001)..."
+            value={topLookupQuery}
+            onChange={(e) => {
+              setTopLookupQuery(e.target.value);
+              setSearchQuery(e.target.value);
+            }}
+            className="w-full pl-10 pr-9 py-2.5 text-xs bg-slate-50 border border-slate-200 rounded-xl text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-medium"
+          />
+        </div>
+
+        {/* Live Matching Customer Cards when typing */}
+        {topLookupQuery.trim() && (
+          <div className="pt-2 border-t border-slate-100 max-h-64 overflow-y-auto divide-y divide-slate-100">
+            {topLookupMatches.length === 0 ? (
+              <div className="py-4 text-center text-xs text-slate-400">
+                No customer found matching "{topLookupQuery}". You can add them with "+ Add Customer" above.
+              </div>
+            ) : (
+              topLookupMatches.slice(0, 6).map((c) => {
+                return (
+                  <div
+                    key={c.id}
+                    className="py-2 px-3 hover:bg-indigo-50/60 rounded-lg flex items-center justify-between cursor-pointer transition-colors"
+                    onClick={() => {
+                      setViewingCustomer(c);
+                      setDetailModalOpen(true);
+                    }}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-700 font-bold flex items-center justify-center text-xs shrink-0">
+                        {c.name.charAt(0).toUpperCase()}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="font-bold text-slate-900 text-xs flex items-center gap-2">
+                          <span className="truncate">{c.name}</span>
+                          {c.code && (
+                            <span className="text-[10px] font-mono text-slate-400 font-normal">
+                              ({c.code})
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-slate-500 flex items-center gap-2 mt-0.5 truncate">
+                          {c.phone && <span>📞 {c.phone}</span>}
+                          {c.email && <span>✉️ {c.email}</span>}
+                          {c.companyName && <span>🏢 {c.companyName}</span>}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-3 shrink-0 ml-3">
+                      <div className="text-right">
+                        <span className="text-[10px] uppercase font-bold text-slate-400 block">Balance</span>
+                        <span className={`text-xs font-mono font-bold ${c.currentBalance > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>
+                          {formatCurrency(c.currentBalance, currencyCode, currencySymbol)}
+                        </span>
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="text-xs text-indigo-600 border-indigo-200 hover:bg-indigo-50 py-1 px-2.5 flex items-center gap-1"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setViewingCustomer(c);
+                          setDetailModalOpen(true);
+                        }}
+                      >
+                        <Eye className="w-3.5 h-3.5" /> View Ledger
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Transaction-Derived Balance Policy Alert */}
       <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 flex items-center justify-between">

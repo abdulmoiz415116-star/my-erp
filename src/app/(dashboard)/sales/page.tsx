@@ -35,6 +35,7 @@ import {
   generateWhatsAppInvoiceLink,
   generateEmailInvoiceLink,
 } from '@/lib/pdfPrint';
+import { generateNextInvoiceNumber } from '@/lib/sequenceGenerator';
 import {
   Plus,
   ShoppingCart,
@@ -165,6 +166,35 @@ export default function SalesPage() {
   const [returnRefundMethod, setReturnRefundMethod] = useState<'credit_account' | 'cash_refund'>('credit_account');
   const [returnAccountId, setReturnAccountId] = useState('');
 
+  // Quick Collect Payment Modal State
+  const [collectPaymentModalOpen, setCollectPaymentModalOpen] = useState(false);
+  const [invoiceToCollect, setInvoiceToCollect] = useState<SaleInvoice | null>(null);
+  const [collectAmount, setCollectAmount] = useState('');
+  const [collectAccountId, setCollectAccountId] = useState('');
+  const [collectMethod, setCollectMethod] = useState<'cash' | 'bank_transfer' | 'credit_card' | 'cheque'>('cash');
+  const [collectReference, setCollectReference] = useState('');
+
+  // Customer search state for modals
+  const [customerSearchQuery, setCustomerSearchQuery] = useState('');
+
+  const selectedCustomer = useMemo(() => {
+    return customers.find((c) => c.id === selectedCustomerId);
+  }, [customers, selectedCustomerId]);
+
+  const filteredModalCustomers = useMemo(() => {
+    const q = customerSearchQuery.trim().toLowerCase();
+    const activeList = customers.filter((c) => !c.isDeleted && c.status === 'active');
+    if (!q) return activeList;
+    return activeList.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        c.code?.toLowerCase().includes(q) ||
+        c.phone?.toLowerCase().includes(q) ||
+        c.email?.toLowerCase().includes(q) ||
+        c.companyName?.toLowerCase().includes(q)
+    );
+  }, [customers, customerSearchQuery]);
+
   // Filtered Sales according to tabs & filters
   const filteredSales = useMemo(() => {
     return sales.filter((s) => {
@@ -254,10 +284,15 @@ export default function SalesPage() {
 
   // Form Reset Helper
   const resetForm = () => {
-    const nextNum = `INV-${Math.floor(1000 + Math.random() * 9000)}`;
+    const nextNum = generateNextInvoiceNumber(
+      sales.map((s) => s.invoiceNumber),
+      currentTenant?.settings?.invoicePrefix || 'INV-',
+      currentTenant?.settings?.invoiceNextNumber || 1001
+    );
     setInvoiceNumberInput(nextNum);
     setSaleTypeInput('cash');
     setSelectedCustomerId('');
+    setCustomerSearchQuery('');
     setInvoiceDate(new Date().toISOString().split('T')[0]);
     setDueDate(new Date(Date.now() + 30 * 86400000).toISOString().split('T')[0]);
     setInvoiceNotes('');
@@ -372,7 +407,13 @@ export default function SalesPage() {
       const customerName = customer ? customer.name : 'Valued Customer';
       const targetAccount = accounts.find((a) => a.id === selectedAccountId) || accounts[0];
 
-      const invNumber = invoiceNumberInput.trim() || `INV-${Math.floor(1000 + Math.random() * 9000)}`;
+      const invNumber =
+        invoiceNumberInput.trim() ||
+        generateNextInvoiceNumber(
+          sales.map((s) => s.invoiceNumber),
+          currentTenant?.settings?.invoicePrefix || 'INV-',
+          currentTenant?.settings?.invoiceNextNumber || 1001
+        );
 
       const invoiceItems: SaleInvoiceItem[] = lineItems.map((it) => {
         const lineSub = it.quantity * it.unitPrice;
@@ -731,6 +772,123 @@ export default function SalesPage() {
     }
   };
 
+  // Open Quick Collect Payment Modal on Invoice
+  const handleOpenCollectPaymentModal = (invoice: SaleInvoice) => {
+    if (invoice.saleStatus === 'void' || invoice.saleStatus === 'draft') {
+      showToast('Cannot collect payment on draft or voided invoices.', 'info');
+      return;
+    }
+    if (invoice.balanceAmount <= 0) {
+      showToast('This invoice is already paid in full.', 'info');
+      return;
+    }
+    setInvoiceToCollect(invoice);
+    setCollectAmount(invoice.balanceAmount.toString());
+    const activeAccs = accounts.filter((a) => a.status === 'active' && !a.isDeleted);
+    setCollectAccountId(activeAccs[0]?.id || '');
+    setCollectMethod('cash');
+    setCollectReference(`RCPT-${invoice.invoiceNumber}`);
+    setCollectPaymentModalOpen(true);
+  };
+
+  // Confirm Quick Collect Payment
+  const handleConfirmCollectPayment = async () => {
+    if (!invoiceToCollect || isSubmitting) return;
+    const parsed = parseFloat(collectAmount);
+    if (!parsed || parsed <= 0) {
+      showToast('Please enter a valid payment amount greater than 0.', 'error');
+      return;
+    }
+    if (parsed > invoiceToCollect.balanceAmount) {
+      showToast(
+        `Amount cannot exceed outstanding balance of ${formatCurrency(invoiceToCollect.balanceAmount, currencyCode, currencySymbol)}.`,
+        'error'
+      );
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      const nowStr = new Date().toISOString();
+      const targetAcc = accounts.find((a) => a.id === collectAccountId) || accounts[0];
+      const rcptNum = `RCPT-${Date.now().toString().slice(-5)}`;
+
+      // 1. Auto-generate Payment receipt in Payment Ledger
+      await paymentService.create({
+        paymentNumber: rcptNum,
+        partyType: 'customer',
+        partyId: invoiceToCollect.customerId,
+        partyName: invoiceToCollect.customerName,
+        type: 'receipt',
+        amount: parsed,
+        date: nowStr.split('T')[0],
+        accountId: targetAcc ? targetAcc.id : 'acc-001',
+        accountName: targetAcc ? targetAcc.accountName : 'Cash / Till',
+        paymentMethod: collectMethod,
+        reference: collectReference || invoiceToCollect.invoiceNumber,
+        invoiceId: invoiceToCollect.id,
+        invoiceNumber: invoiceToCollect.invoiceNumber,
+        notes: `Direct collection on Invoice #${invoiceToCollect.invoiceNumber}`,
+        status: 'active',
+      });
+
+      // 2. Deposit into Account
+      if (targetAcc) {
+        await accountService.update(targetAcc.id, {
+          currentBalance: (targetAcc.currentBalance || 0) + parsed,
+        });
+      }
+
+      // 3. Update Invoice
+      const newPaid = (invoiceToCollect.paidAmount || 0) + parsed;
+      const newBalance = Math.max(0, invoiceToCollect.totalAmount - newPaid);
+      const newStatus = newBalance <= 0.01 ? 'paid' : 'partial';
+
+      await saleService.update(invoiceToCollect.id, {
+        paidAmount: newPaid,
+        balanceAmount: newBalance,
+        paymentStatus: newStatus,
+      });
+
+      // 4. Update Customer Ledger Balance
+      const cust = customers.find((c) => c.id === invoiceToCollect.customerId);
+      if (cust) {
+        await customerService.update(cust.id, {
+          currentBalance: Math.max(0, (cust.currentBalance || 0) - parsed),
+        });
+      }
+
+      // 5. Immutable Audit Log
+      await auditLogService.create({
+        action: 'PAYMENT',
+        module: 'Sales',
+        entityId: invoiceToCollect.invoiceNumber,
+        entityName: invoiceToCollect.customerName,
+        description: `Collected ${formatCurrency(parsed, currencyCode, currencySymbol)} on Invoice #${invoiceToCollect.invoiceNumber}. Deposited to ${targetAcc?.accountName || 'Cash Account'}`,
+        userId: user?.uid || 'system',
+        userName: user?.displayName || 'Sales Officer',
+        userEmail: user?.email || 'admin@erp.com',
+        timestamp: nowStr,
+      });
+
+      showToast(`Receipt of ${formatCurrency(parsed, currencyCode, currencySymbol)} recorded and synced!`, 'success');
+      setCollectPaymentModalOpen(false);
+      if (viewInvoice?.id === invoiceToCollect.id) {
+        setViewInvoice({
+          ...viewInvoice,
+          paidAmount: newPaid,
+          balanceAmount: newBalance,
+          paymentStatus: newStatus,
+        });
+      }
+      setInvoiceToCollect(null);
+    } catch (err: any) {
+      showToast(err.message || 'Failed to record payment.', 'error');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   // Open Void Modal
   const handleOpenVoidModal = (invoice: SaleInvoice) => {
     if (invoice.saleStatus === 'void') {
@@ -948,7 +1106,7 @@ export default function SalesPage() {
         }
       }
 
-      // 2. If Cash Refund, disburse from Account
+      // 2. Process Refund or Account Credit
       if (returnRefundMethod === 'cash_refund') {
         const targetAcc = accounts.find((a) => a.id === returnAccountId) || accounts[0];
         if (targetAcc && totalReturnValue > 0) {
@@ -973,12 +1131,25 @@ export default function SalesPage() {
             currentBalance: Math.max(0, (targetAcc.currentBalance || 0) - totalReturnValue),
           });
         }
+      } else {
+        // Store Credit / Account balance adjustment: Reduce customer receivable debt
+        const cust = customers.find((c) => c.id === activeTargetSale.customerId);
+        if (cust && totalReturnValue > 0) {
+          await customerService.update(cust.id, {
+            currentBalance: Math.max(0, (cust.currentBalance || 0) - totalReturnValue),
+          });
+        }
       }
 
       // 3. Update Sale Document
+      const updatedBalanceDue = returnRefundMethod === 'cash_refund'
+        ? (activeTargetSale.balanceAmount || 0)
+        : Math.max(0, (activeTargetSale.balanceAmount || 0) - totalReturnValue);
+
       await saleService.update(activeTargetSale.id, {
         items: updatedItems,
         saleStatus: 'returned',
+        balanceAmount: updatedBalanceDue,
         returnReason: returnReasonInput,
         returnDate: nowStr,
         notes: `${activeTargetSale.notes ? activeTargetSale.notes + ' | ' : ''}Items returned on ${formatDate(nowStr)}. Value: ${formatCurrency(totalReturnValue, currencyCode, currencySymbol)}`,
@@ -1392,6 +1563,18 @@ export default function SalesPage() {
                           >
                             <Eye className="w-4 h-4 text-slate-600" />
                           </Button>
+                          {/* Quick Collect Payment on Invoice with Balance Due */}
+                          {inv.balanceAmount > 0 && !isVoid && !isDraft && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => handleOpenCollectPaymentModal(inv)}
+                              title={`Collect Payment (${formatCurrency(inv.balanceAmount, currencyCode, currencySymbol)} due)`}
+                              className="text-emerald-600 hover:bg-emerald-50"
+                            >
+                              <DollarSign className="w-4 h-4" />
+                            </Button>
+                          )}
                           <Button
                             size="sm"
                             variant="ghost"
@@ -1528,24 +1711,54 @@ export default function SalesPage() {
               </select>
             </div>
 
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Customer *
-              </label>
+            <div className="space-y-1">
+              <div className="flex items-center justify-between">
+                <label className="block text-xs font-semibold text-slate-700">
+                  Customer *
+                </label>
+                {customerSearchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setCustomerSearchQuery('')}
+                    className="text-[10px] text-indigo-600 hover:text-indigo-800 font-semibold"
+                  >
+                    Clear Filter
+                  </button>
+                )}
+              </div>
+              <div className="relative">
+                <input
+                  type="text"
+                  placeholder="Search by name, phone, code..."
+                  value={customerSearchQuery}
+                  onChange={(e) => setCustomerSearchQuery(e.target.value)}
+                  className="w-full pl-7 pr-2 py-1.5 text-xs border border-slate-300 rounded-lg bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2 top-2" />
+              </div>
               <select
                 value={selectedCustomerId}
                 onChange={(e) => setSelectedCustomerId(e.target.value)}
-                className="w-full py-2 px-2.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className="w-full mt-1 py-2 px-2.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                required
               >
-                <option value="">Select Customer...</option>
-                {customers
-                  .filter((c) => !c.isDeleted && c.status === 'active')
-                  .map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name} (Bal: {formatCurrency(c.currentBalance, currencyCode, currencySymbol)})
-                    </option>
-                  ))}
+                <option value="">-- Choose Customer ({filteredModalCustomers.length}) --</option>
+                {filteredModalCustomers.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name} {c.code ? `(${c.code})` : ''} {c.phone ? `• ${c.phone}` : ''} (Bal: {formatCurrency(c.currentBalance, currencyCode, currencySymbol)})
+                  </option>
+                ))}
               </select>
+              {selectedCustomer && (
+                <div className="mt-1 px-2 py-1 bg-indigo-50 border border-indigo-100 rounded text-[11px] flex items-center justify-between">
+                  <span className="font-semibold text-indigo-900 truncate">
+                    {selectedCustomer.name} {selectedCustomer.phone ? `(${selectedCustomer.phone})` : ''}
+                  </span>
+                  <span className="font-mono text-rose-600 font-bold shrink-0 ml-1">
+                    Due: {formatCurrency(selectedCustomer.currentBalance, currencyCode, currencySymbol)}
+                  </span>
+                </div>
+              )}
             </div>
 
             <div>
@@ -1597,6 +1810,7 @@ export default function SalesPage() {
             <table className="w-full text-xs text-left">
               <thead className="bg-slate-100 text-slate-700 font-semibold border-b border-slate-200">
                 <tr>
+                  <th className="p-2.5 w-10 text-center">#</th>
                   <th className="p-2.5">Product Description</th>
                   <th className="p-2.5 w-24 text-center">Stock</th>
                   <th className="p-2.5 w-24 text-center">Quantity</th>
@@ -1610,7 +1824,7 @@ export default function SalesPage() {
               <tbody className="divide-y divide-slate-100 font-mono">
                 {lineItems.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="p-8 text-center text-slate-400 font-sans">
+                    <td colSpan={9} className="p-8 text-center text-slate-400 font-sans">
                       No items added yet. Choose a product above.
                     </td>
                   </tr>
@@ -1623,6 +1837,9 @@ export default function SalesPage() {
 
                     return (
                       <tr key={item.productId} className="hover:bg-slate-50">
+                        <td className="p-2.5 text-center font-bold font-mono text-slate-500">
+                          {index + 1}
+                        </td>
                         <td className="p-2.5 font-sans">
                           <span className="font-semibold text-slate-900 block">{item.productName}</span>
                           <span className="text-[10px] text-slate-400 font-mono">{item.sku}</span>
@@ -1867,16 +2084,26 @@ export default function SalesPage() {
 
           {/* Customer & Dates */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Customer</label>
+            <div className="space-y-1">
+              <label className="block text-xs font-semibold text-slate-700">Customer</label>
+              <div className="relative">
+                <input
+                  type="text"
+                  placeholder="Search customer..."
+                  value={customerSearchQuery}
+                  onChange={(e) => setCustomerSearchQuery(e.target.value)}
+                  className="w-full pl-7 pr-2 py-1.5 text-xs border border-slate-300 rounded-lg bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2 top-2" />
+              </div>
               <select
                 value={selectedCustomerId}
                 onChange={(e) => setSelectedCustomerId(e.target.value)}
-                className="w-full py-2 px-2.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-800"
+                className="w-full mt-1 py-2 px-2.5 bg-white border border-slate-300 rounded-lg text-xs font-semibold text-slate-800"
               >
-                {customers.map((c) => (
+                {filteredModalCustomers.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.name}
+                    {c.name} {c.code ? `(${c.code})` : ''}
                   </option>
                 ))}
               </select>
@@ -1906,6 +2133,7 @@ export default function SalesPage() {
             <table className="w-full text-xs text-left">
               <thead className="bg-slate-100 text-slate-700 font-semibold border-b border-slate-200">
                 <tr>
+                  <th className="p-2.5 w-10 text-center">#</th>
                   <th className="p-2.5">Product</th>
                   <th className="p-2.5 w-24 text-center">Qty</th>
                   <th className="p-2.5 w-28 text-right">Price</th>
@@ -1917,6 +2145,9 @@ export default function SalesPage() {
               <tbody className="divide-y divide-slate-100 font-mono">
                 {lineItems.map((item, index) => (
                   <tr key={index}>
+                    <td className="p-2.5 text-center font-bold font-mono text-slate-500">
+                      {index + 1}
+                    </td>
                     <td className="p-2.5 font-sans font-semibold text-slate-900">{item.productName}</td>
                     <td className="p-2.5 text-center">
                       <input
@@ -2168,6 +2399,119 @@ export default function SalesPage() {
         </div>
       </Modal>
 
+      {/* QUICK COLLECT PAYMENT ON INVOICE MODAL */}
+      <Modal
+        isOpen={collectPaymentModalOpen}
+        onClose={() => {
+          setCollectPaymentModalOpen(false);
+          setInvoiceToCollect(null);
+        }}
+        title={`Collect Payment - ${invoiceToCollect?.invoiceNumber || ''}`}
+        size="md"
+      >
+        {invoiceToCollect && (
+          <div className="space-y-4">
+            <div className="bg-slate-50 p-3 rounded-lg border border-slate-200 text-xs flex justify-between items-center">
+              <div>
+                <span className="text-slate-500 block">Customer:</span>
+                <span className="font-bold text-slate-800 text-sm">{invoiceToCollect.customerName}</span>
+              </div>
+              <div className="text-right">
+                <span className="text-slate-500 block">Balance Due:</span>
+                <span className="font-bold font-mono text-rose-600 text-base">
+                  {formatCurrency(invoiceToCollect.balanceAmount, currencyCode, currencySymbol)}
+                </span>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Receipt Amount ({currencySymbol}) *
+              </label>
+              <input
+                type="number"
+                step="0.01"
+                min="0.01"
+                max={invoiceToCollect.balanceAmount}
+                value={collectAmount}
+                onChange={(e) => setCollectAmount(e.target.value)}
+                className="w-full text-sm font-mono font-bold px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                placeholder="0.00"
+              />
+              <span className="text-[11px] text-slate-400 mt-1 block">
+                Total Invoice: {formatCurrency(invoiceToCollect.totalAmount, currencyCode, currencySymbol)} | Already Paid: {formatCurrency(invoiceToCollect.paidAmount, currencyCode, currencySymbol)}
+              </span>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1">
+                Deposit Destination Account *
+              </label>
+              <select
+                value={collectAccountId}
+                onChange={(e) => setCollectAccountId(e.target.value)}
+                className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
+              >
+                {accounts
+                  .filter((a) => a.status === 'active' && !a.isDeleted)
+                  .map((acc) => (
+                    <option key={acc.id} value={acc.id}>
+                      {acc.accountName} ({acc.type?.toUpperCase() || 'CASH'}) - Bal: {formatCurrency(acc.currentBalance || 0, currencyCode, currencySymbol)}
+                    </option>
+                  ))}
+              </select>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Payment Method</label>
+                <select
+                  value={collectMethod}
+                  onChange={(e) => setCollectMethod(e.target.value as any)}
+                  className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-white"
+                >
+                  <option value="cash">Cash in Till</option>
+                  <option value="bank_transfer">Bank Transfer</option>
+                  <option value="credit_card">Credit / Debit Card</option>
+                  <option value="cheque">Cheque</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Payment Reference</label>
+                <input
+                  type="text"
+                  value={collectReference}
+                  onChange={(e) => setCollectReference(e.target.value)}
+                  placeholder="e.g. TRX-9821 or Cash"
+                  className="w-full text-xs px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-4 border-t border-slate-200">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setCollectPaymentModalOpen(false);
+                  setInvoiceToCollect(null);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleConfirmCollectPayment}
+                disabled={isSubmitting}
+                className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold"
+              >
+                {isSubmitting ? 'Recording Receipt...' : 'Confirm Receipt & Sync'}
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
       {/* VIEW SALE MODAL */}
       {viewInvoice && (
         <Modal
@@ -2192,6 +2536,16 @@ export default function SalesPage() {
               </div>
 
               <div className="flex flex-wrap items-center gap-1.5">
+                {viewInvoice.balanceAmount > 0 && viewInvoice.saleStatus !== 'void' && viewInvoice.saleStatus !== 'draft' && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    onClick={() => handleOpenCollectPaymentModal(viewInvoice)}
+                    className="flex items-center gap-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs py-1"
+                  >
+                    <DollarSign className="w-3.5 h-3.5" /> Collect ({formatCurrency(viewInvoice.balanceAmount, currencyCode, currencySymbol)})
+                  </Button>
+                )}
                 <Button
                   size="sm"
                   variant="outline"
@@ -2258,6 +2612,7 @@ export default function SalesPage() {
               <table className="w-full text-xs text-left">
                 <thead className="bg-slate-100 text-slate-700 border-b border-slate-200 font-semibold">
                   <tr>
+                    <th className="p-2.5 w-10 text-center">#</th>
                     <th className="p-2.5">Item Description</th>
                     <th className="p-2.5 text-center">Qty</th>
                     <th className="p-2.5 text-right">Price</th>
@@ -2269,6 +2624,9 @@ export default function SalesPage() {
                 <tbody className="divide-y divide-slate-100 font-mono">
                   {viewInvoice.items?.map((item, i) => (
                     <tr key={i}>
+                      <td className="p-2.5 text-center font-bold font-mono text-slate-500">
+                        {i + 1}
+                      </td>
                       <td className="p-2.5 font-sans">
                         <div className="font-medium text-slate-900">{item.productName}</div>
                         <div className="text-[10px] text-slate-400 font-mono">{item.sku}</div>

@@ -22,6 +22,7 @@ import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { formatCurrency } from '@/lib/utils';
 import { printThermalReceipt } from '@/lib/pdfPrint';
+import { generateNextPOSInvoiceNumber } from '@/lib/sequenceGenerator';
 import {
   Search,
   Barcode,
@@ -62,13 +63,28 @@ export default function PosPage() {
   const { allItems: categories } = useRealtimeCollection<Category>((tId) => new CategoryService(tId));
   const { allItems: customers } = useRealtimeCollection<Customer>((tId) => new CustomerService(tId));
   const { allItems: accounts } = useRealtimeCollection<Account>((tId) => new AccountService(tId));
+  const { allItems: allSales } = useRealtimeCollection<SaleInvoice>((tId) => new SaleService(tId));
 
   // Active state
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [cart, setCart] = useState<CartItem[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('walk-in');
+  const [customerSearchQuery, setCustomerSearchQuery] = useState<string>('');
   const [discountPercent, setDiscountPercent] = useState<number>(0);
+
+  const filteredPosCustomers = useMemo(() => {
+    const q = customerSearchQuery.trim().toLowerCase();
+    const activeList = customers.filter((c) => !c.isDeleted && c.status === 'active');
+    if (!q) return activeList;
+    return activeList.filter(
+      (c) =>
+        c.name.toLowerCase().includes(q) ||
+        c.code?.toLowerCase().includes(q) ||
+        c.phone?.toLowerCase().includes(q) ||
+        c.email?.toLowerCase().includes(q)
+    );
+  }, [customers, customerSearchQuery]);
 
   // Settlement Modal
   const [isTenderModalOpen, setIsTenderModalOpen] = useState(false);
@@ -248,7 +264,11 @@ export default function PosPage() {
 
       const targetAccount = accounts.find((a) => a.id === selectedAccountId) || accounts[0];
 
-      const invNumber = `INV-POS-${Math.floor(10000 + Math.random() * 90000)}`;
+      const invNumber = generateNextPOSInvoiceNumber(
+        allSales.map((s) => s.invoiceNumber),
+        'POS-',
+        1001
+      );
       const nowStr = new Date().toISOString();
 
       const invoiceItems: SaleInvoiceItem[] = cart.map((c) => ({
@@ -525,19 +545,40 @@ export default function PosPage() {
             </div>
           </div>
 
-          <div className="mt-2.5">
-            <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block mb-1">
-              Select Customer
-            </label>
+          <div className="mt-2.5 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider block">
+                Select Customer
+              </label>
+              {customerSearchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setCustomerSearchQuery('')}
+                  className="text-[10px] text-indigo-400 hover:text-indigo-300 font-semibold"
+                >
+                  Clear Filter
+                </button>
+              )}
+            </div>
+            <div className="relative">
+              <input
+                type="text"
+                placeholder="Search customer (Name, Phone)..."
+                value={customerSearchQuery}
+                onChange={(e) => setCustomerSearchQuery(e.target.value)}
+                className="w-full pl-7 pr-2 py-1 bg-slate-800 border border-slate-700 rounded-lg text-xs text-white placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              />
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2 top-2" />
+            </div>
             <select
               value={selectedCustomerId}
               onChange={(e) => setSelectedCustomerId(e.target.value)}
               className="w-full py-1.5 px-2 bg-slate-800 border border-slate-700 rounded-lg text-xs text-white focus:outline-none focus:ring-1 focus:ring-indigo-500 font-medium"
             >
               <option value="walk-in">👤 Walk-in Retail Customer (Default)</option>
-              {customers.map((c) => (
+              {filteredPosCustomers.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.name} ({c.phone || c.email || 'Account'})
+                  {c.name} {c.code ? `(${c.code})` : ''} {c.phone ? `• ${c.phone}` : ''}
                 </option>
               ))}
             </select>
@@ -557,6 +598,9 @@ export default function PosPage() {
           ) : (
             cart.map((item, index) => (
               <div key={item.product.id} className="py-2.5 flex items-center justify-between gap-2 text-xs">
+                <span className="w-5 text-center font-mono font-bold text-[11px] text-slate-400 shrink-0">
+                  #{index + 1}
+                </span>
                 <div className="flex-1 min-w-0">
                   <h5 className="font-semibold text-slate-900 truncate leading-snug">
                     {item.product.name}

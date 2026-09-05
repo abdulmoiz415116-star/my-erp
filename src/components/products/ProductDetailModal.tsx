@@ -3,7 +3,7 @@
 import React, { useState, useMemo } from 'react';
 import { Product, StockTransaction, SaleInvoice, PurchaseOrder } from '@/types/erp';
 import { generateProductStockLedger } from '@/services/erp.service';
-import { printProductStockCard } from '@/lib/pdfPrint';
+import { printProductStockCard, printBarcodeLabels } from '@/lib/pdfPrint';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { formatCurrency, formatDate } from '@/lib/utils';
@@ -280,6 +280,30 @@ export function ProductDetailModal({
                 </span>
               </div>
               <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() =>
+                    product &&
+                    printBarcodeLabels(
+                      [
+                        {
+                          name: product.name,
+                          sku: product.sku,
+                          barcode: product.barcode || product.sku,
+                          sellingPrice: product.sellingPrice,
+                          category: product.category,
+                          unit: product.unit,
+                          quantity: 12,
+                        },
+                      ],
+                      null
+                    )
+                  }
+                  className="flex items-center gap-1.5 text-xs py-1"
+                >
+                  <Barcode className="w-3.5 h-3.5 text-slate-600" /> Barcodes (12)
+                </Button>
                 <Button
                   size="sm"
                   variant="outline"

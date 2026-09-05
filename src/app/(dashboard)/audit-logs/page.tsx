@@ -9,6 +9,7 @@ import { PageHeader } from '@/components/common/PageHeader';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 import { formatDateTime, formatDate } from '@/lib/utils';
+import { printReportDocument } from '@/lib/pdfPrint';
 import {
   History,
   Shield,
@@ -192,7 +193,31 @@ export default function AuditLogsPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => window.print()}
+            onClick={() => {
+              printReportDocument({
+                title: 'System Security & Forensic Audit Trail',
+                subtitle: 'Immutable Administrative Event Logs & Integrity Record',
+                dateRange: `${selectedAction === 'all' ? 'All Actions' : selectedAction} | ${selectedModule === 'all' ? 'All Modules' : selectedModule}`,
+                columns: [
+                  { header: 'Timestamp', key: 'formattedTime' },
+                  { header: 'Action', key: 'action', align: 'center' },
+                  { header: 'Module', key: 'module', align: 'center' },
+                  { header: 'Target Entity', key: 'target' },
+                  { header: 'Event Description', key: 'description' },
+                  { header: 'Staff / Operator', key: 'userName' },
+                ],
+                rows: filteredLogs.map((l) => ({
+                  formattedTime: formatDateTime(l.timestamp),
+                  action: l.action,
+                  module: l.module,
+                  target: l.recordId || l.entityName || l.entityId || '—',
+                  description: l.description,
+                  userName: `${l.userName} (${l.userEmail})`,
+                })),
+                summaryMetrics: [{ label: 'Total Events Logged', value: filteredLogs.length }],
+                tenant: currentTenant,
+              });
+            }}
             className="flex items-center gap-1.5 text-xs font-semibold"
           >
             <Printer className="w-3.5 h-3.5 text-slate-600" />

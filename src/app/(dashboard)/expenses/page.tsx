@@ -21,6 +21,7 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { formatCurrency, formatDate } from '@/lib/utils';
 import { printExpenseVoucher } from '@/lib/pdfPrint';
+import { generateNextExpenseNumber } from '@/lib/sequenceGenerator';
 import {
   Plus,
   Receipt,
@@ -192,7 +193,9 @@ export default function ExpensesPage() {
     setSubmitting(true);
     try {
       const effectiveStatus: ExpenseStatus = asDraft ? 'draft' : 'posted';
-      const expenseNumber = editingExpense ? editingExpense.expenseNumber : `EXP-${Date.now().toString().slice(-5)}`;
+      const expenseNumber = editingExpense
+        ? editingExpense.expenseNumber
+        : generateNextExpenseNumber(expenses.map((e) => e.expenseNumber));
 
       const payload: Partial<Expense> = {
         expenseNumber,
@@ -218,10 +221,28 @@ export default function ExpensesPage() {
         await createItem(payload as any);
       }
 
-      // If Posted: Decrement Account Balance and create audit log
+      // If Posted: Decrement Account Balance, Record Payment Disbursement, and create audit log
       if (!asDraft) {
         await accountService.update(selectedAccount.id, {
           currentBalance: (selectedAccount.currentBalance || 0) - total,
+        });
+
+        // Record Disbursement in Payment Register for real-time treasury sync
+        const payNum = `PAY-EXP-${expenseNumber}`;
+        await paymentService.create({
+          paymentNumber: payNum,
+          partyType: 'direct_deposit',
+          partyId: selectedAccount.id,
+          partyName: vendor ? `${category} (${vendor})` : category,
+          type: 'payment',
+          amount: total,
+          date: date || new Date().toISOString().split('T')[0],
+          accountId: selectedAccount.id,
+          accountName: selectedAccount.accountName,
+          paymentMethod: paymentMethod,
+          reference: expenseNumber,
+          notes: description || `Operating Expense: ${category}`,
+          status: 'active',
         });
 
         await auditLogService.create({

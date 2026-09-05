@@ -30,6 +30,7 @@ import { useRealtimeCollection } from '@/hooks/useRealtimeCollection';
 import { PageHeader } from '@/components/common/PageHeader';
 import { Button } from '@/components/ui/Button';
 import { formatCurrency, formatDate } from '@/lib/utils';
+import { printReportDocument, printProfitAndLossStatement } from '@/lib/pdfPrint';
 import {
   BarChart3,
   ShoppingCart,
@@ -733,10 +734,275 @@ export default function ReportsPage() {
   };
 
   // ==========================================
-  // PRINT CURRENT REPORT
+  // PRINT CURRENT REPORT (Universal A4 Document Engine)
   // ==========================================
   const printCurrentReport = () => {
-    window.print();
+    const periodStr = `${datePreset.toUpperCase()} (${customStartDate || 'All'} to ${customEndDate || 'Present'})`;
+
+    if (activeReport === 'sales') {
+      const totalRev = filteredSales.reduce((s, x) => s + (x.totalAmount || 0), 0);
+      const totalRec = filteredSales.reduce((s, x) => s + (x.paidAmount || 0), 0);
+      const totalBal = filteredSales.reduce((s, x) => s + (x.balanceAmount || 0), 0);
+
+      printReportDocument({
+        title: 'Commercial Sales Register Report',
+        subtitle: 'Comprehensive Invoiced Sales, Tax Breakdown & Receivables Summary',
+        dateRange: periodStr,
+        columns: [
+          { header: 'Invoice #', key: 'invoiceNumber' },
+          { header: 'Date', key: 'invoiceDate', format: 'date' },
+          { header: 'Customer', key: 'customerName' },
+          { header: 'Status', key: 'saleStatus', align: 'center' },
+          { header: 'Payment', key: 'paymentStatus', align: 'center' },
+          { header: 'Total Amount', key: 'totalAmount', align: 'right', format: 'currency' },
+          { header: 'Paid', key: 'paidAmount', align: 'right', format: 'currency' },
+          { header: 'Balance Due', key: 'balanceDue', align: 'right', format: 'currency' },
+        ],
+        rows: filteredSales,
+        summaryMetrics: [
+          { label: 'Total Invoiced', value: totalRev, isCurrency: true },
+          { label: 'Total Received', value: totalRec, isCurrency: true },
+          { label: 'Total Outstanding', value: totalBal, isCurrency: true },
+          { label: 'Invoices Count', value: filteredSales.length },
+        ],
+        tenant: currentTenant,
+      });
+    } else if (activeReport === 'purchases') {
+      const totalCost = filteredPurchases.reduce((s, x) => s + (x.totalAmount || 0), 0);
+      const totalPaid = filteredPurchases.reduce((s, x) => s + (x.paidAmount || 0), 0);
+      const totalDue = filteredPurchases.reduce((s, x) => s + (x.balanceAmount || 0), 0);
+
+      printReportDocument({
+        title: 'Vendor Purchases & Procurement Report',
+        subtitle: 'Billed Procurement Orders, Tax & Payables Analysis',
+        dateRange: periodStr,
+        columns: [
+          { header: 'PO #', key: 'poNumber' },
+          { header: 'Date', key: 'orderDate', format: 'date' },
+          { header: 'Supplier', key: 'supplierName' },
+          { header: 'Status', key: 'orderStatus', align: 'center' },
+          { header: 'Payment', key: 'paymentStatus', align: 'center' },
+          { header: 'Total Cost', key: 'totalAmount', align: 'right', format: 'currency' },
+          { header: 'Paid', key: 'paidAmount', align: 'right', format: 'currency' },
+          { header: 'Balance Due', key: 'balanceDue', align: 'right', format: 'currency' },
+        ],
+        rows: filteredPurchases,
+        summaryMetrics: [
+          { label: 'Total Purchases', value: totalCost, isCurrency: true },
+          { label: 'Total Paid', value: totalPaid, isCurrency: true },
+          { label: 'Total Payables Due', value: totalDue, isCurrency: true },
+          { label: 'Orders Count', value: filteredPurchases.length },
+        ],
+        tenant: currentTenant,
+      });
+    } else if (activeReport === 'expenses') {
+      const totalExp = filteredExpenses.reduce((s, x) => s + (x.totalAmount || 0), 0);
+
+      printReportDocument({
+        title: 'Operational Overhead & Expense Report',
+        subtitle: 'Disbursements by Category, Account & Tax Breakdown',
+        dateRange: periodStr,
+        columns: [
+          { header: 'Expense #', key: 'expenseNumber' },
+          { header: 'Date', key: 'date', format: 'date' },
+          { header: 'Category', key: 'category' },
+          { header: 'Disbursed Account', key: 'accountName' },
+          { header: 'Vendor / Beneficiary', key: 'vendor' },
+          { header: 'Tax', key: 'taxAmount', align: 'right', format: 'currency' },
+          { header: 'Total Disbursed', key: 'totalAmount', align: 'right', format: 'currency' },
+        ],
+        rows: filteredExpenses,
+        summaryMetrics: [
+          { label: 'Total Overhead', value: totalExp, isCurrency: true },
+          { label: 'Vouchers Count', value: filteredExpenses.length },
+        ],
+        tenant: currentTenant,
+      });
+    } else if (activeReport === 'customer_outstanding') {
+      const totalCustRec = customerOutstandingData.reduce((s, x) => s + (x.currentBalance || 0), 0);
+
+      printReportDocument({
+        title: 'Customer Aging & Receivables Report',
+        subtitle: 'Debtors Ledger Balances & Credit Exposure',
+        dateRange: periodStr,
+        columns: [
+          { header: 'Customer Name', key: 'name' },
+          { header: 'Phone', key: 'phone' },
+          { header: 'Credit Limit', key: 'creditLimit', align: 'right', format: 'currency' },
+          { header: 'Total Invoiced', key: 'totalBilled', align: 'right', format: 'currency' },
+          { header: 'Total Paid', key: 'totalPaid', align: 'right', format: 'currency' },
+          { header: 'Outstanding Due', key: 'currentBalance', align: 'right', format: 'currency' },
+        ],
+        rows: customerOutstandingData,
+        summaryMetrics: [
+          { label: 'Total Receivables', value: totalCustRec, isCurrency: true },
+          { label: 'Debtors Count', value: customerOutstandingData.length },
+        ],
+        tenant: currentTenant,
+      });
+    } else if (activeReport === 'supplier_outstanding') {
+      const totalSuppPay = supplierOutstandingData.reduce((s, x) => s + (x.currentBalance || 0), 0);
+
+      printReportDocument({
+        title: 'Supplier Payables Outstanding Report',
+        subtitle: 'Vendor Balances & Pending Liabilities',
+        dateRange: periodStr,
+        columns: [
+          { header: 'Supplier Name', key: 'name' },
+          { header: 'Company', key: 'companyName' },
+          { header: 'Phone', key: 'phone' },
+          { header: 'Total Billed', key: 'totalPurchases', align: 'right', format: 'currency' },
+          { header: 'Total Paid', key: 'totalPaid', align: 'right', format: 'currency' },
+          { header: 'Outstanding Due', key: 'currentBalance', align: 'right', format: 'currency' },
+        ],
+        rows: supplierOutstandingData,
+        summaryMetrics: [
+          { label: 'Total Payables Due', value: totalSuppPay, isCurrency: true },
+          { label: 'Creditors Count', value: supplierOutstandingData.length },
+        ],
+        tenant: currentTenant,
+      });
+    } else if (activeReport === 'stock_report') {
+      const totalVal = stockReportData.reduce((s, x) => s + (x.valuation || 0), 0);
+      const totalQty = stockReportData.reduce((s, x) => s + (x.currentStock || 0), 0);
+      const lowCount = stockReportData.filter((x) => x.stockStatus === 'Low Stock' || x.stockStatus === 'Out of Stock').length;
+
+      printReportDocument({
+        title: 'Inventory Valuation & Bin Status Report',
+        subtitle: 'Physical Stock Counts, Valuation & Reorder Alerts',
+        dateRange: periodStr,
+        columns: [
+          { header: 'SKU', key: 'sku' },
+          { header: 'Product Name', key: 'name' },
+          { header: 'Category', key: 'category' },
+          { header: 'Cost Price', key: 'costPrice', align: 'right', format: 'currency' },
+          { header: 'Selling Price', key: 'sellingPrice', align: 'right', format: 'currency' },
+          { header: 'On Hand', key: 'currentStock', align: 'center', format: 'number' },
+          { header: 'Valuation', key: 'valuation', align: 'right', format: 'currency' },
+          { header: 'Stock Health', key: 'stockStatus', align: 'center' },
+        ],
+        rows: stockReportData,
+        summaryMetrics: [
+          { label: 'Inventory Valuation', value: totalVal, isCurrency: true },
+          { label: 'Total Physical Units', value: totalQty },
+          { label: 'Low Stock Alerts', value: lowCount },
+        ],
+        tenant: currentTenant,
+      });
+    } else if (activeReport === 'stock_movement') {
+      printReportDocument({
+        title: 'Inventory Movement & Audit Ledger',
+        subtitle: 'Inbound, Outbound & Stock Adjustment Transactions',
+        dateRange: periodStr,
+        columns: [
+          { header: 'Date', key: 'date', format: 'date' },
+          { header: 'Reference', key: 'reference' },
+          { header: 'Product', key: 'productName' },
+          { header: 'SKU', key: 'sku' },
+          { header: 'Type', key: 'type', align: 'center' },
+          { header: 'Direction', key: 'direction', align: 'center' },
+          { header: 'Qty', key: 'quantity', align: 'center', format: 'number' },
+          { header: 'Unit Cost', key: 'cost', align: 'right', format: 'currency' },
+          { header: 'Total Cost', key: 'totalCost', align: 'right', format: 'currency' },
+        ],
+        rows: stockMovementData,
+        summaryMetrics: [
+          { label: 'Total Movement Events', value: stockMovementData.length },
+        ],
+        tenant: currentTenant,
+      });
+    } else if (activeReport === 'cash_report') {
+      const inSum = cashReportData.reduce((s, x) => s + (x.inflow || 0), 0);
+      const outSum = cashReportData.reduce((s, x) => s + (x.outflow || 0), 0);
+
+      printReportDocument({
+        title: 'Cash Book & Petty Cash Movement Report',
+        subtitle: 'Cash Register Receipts & Disbursements',
+        dateRange: periodStr,
+        columns: [
+          { header: 'Date', key: 'date', format: 'date' },
+          { header: 'Payment #', key: 'paymentNumber' },
+          { header: 'Cash Account / Till', key: 'accountName' },
+          { header: 'Party / Beneficiary', key: 'partyName' },
+          { header: 'Inflow', key: 'inflow', align: 'right', format: 'currency' },
+          { header: 'Outflow', key: 'outflow', align: 'right', format: 'currency' },
+          { header: 'Reference', key: 'reference' },
+        ],
+        rows: cashReportData,
+        summaryMetrics: [
+          { label: 'Total Inflow', value: inSum, isCurrency: true },
+          { label: 'Total Outflow', value: outSum, isCurrency: true },
+          { label: 'Net Cash Delta', value: inSum - outSum, isCurrency: true },
+        ],
+        tenant: currentTenant,
+      });
+    } else if (activeReport === 'bank_report') {
+      const inSum = bankReportData.reduce((s, x) => s + (x.inflow || 0), 0);
+      const outSum = bankReportData.reduce((s, x) => s + (x.outflow || 0), 0);
+
+      printReportDocument({
+        title: 'Bank Book & Digital Treasury Report',
+        subtitle: 'Reconciled Bank Deposits, Transfers & Settlements',
+        dateRange: periodStr,
+        columns: [
+          { header: 'Date', key: 'date', format: 'date' },
+          { header: 'Payment #', key: 'paymentNumber' },
+          { header: 'Bank Account', key: 'accountName' },
+          { header: 'Party', key: 'partyName' },
+          { header: 'Method', key: 'method', align: 'center' },
+          { header: 'Inflow', key: 'inflow', align: 'right', format: 'currency' },
+          { header: 'Outflow', key: 'outflow', align: 'right', format: 'currency' },
+          { header: 'Reference', key: 'reference' },
+        ],
+        rows: bankReportData,
+        summaryMetrics: [
+          { label: 'Total Inflow', value: inSum, isCurrency: true },
+          { label: 'Total Outflow', value: outSum, isCurrency: true },
+          { label: 'Net Bank Delta', value: inSum - outSum, isCurrency: true },
+        ],
+        tenant: currentTenant,
+      });
+    } else if (activeReport === 'profit_loss') {
+      printProfitAndLossStatement(
+        {
+          period: datePreset.toUpperCase(),
+          grossSales: pnlData.grossSales,
+          salesReturns: pnlData.salesReturns,
+          netSales: pnlData.netSales,
+          cogsTotal: pnlData.cogsTotal,
+          grossProfit: pnlData.grossProfit,
+          grossMarginPercent: pnlData.grossMargin.toString(),
+          categorizedExpenses: Object.entries(pnlData.categoryMap).map(([category, amount]) => ({ category, amount })),
+          totalOperatingExpenses: pnlData.totalOperatingExpenses,
+          netOperatingProfit: pnlData.netOperatingProfit,
+          netMarginPercent: pnlData.netMargin.toString(),
+        },
+        currentTenant
+      );
+    } else if (activeReport === 'payments') {
+      const totalPay = paymentsReportData.reduce((s, x) => s + (x.amount || 0), 0);
+
+      printReportDocument({
+        title: 'Comprehensive Payment & Settlement Register',
+        subtitle: 'Direct Collections, Vendor Payments & Operating Disbursements',
+        dateRange: periodStr,
+        columns: [
+          { header: 'Payment #', key: 'paymentNumber' },
+          { header: 'Date', key: 'date', format: 'date' },
+          { header: 'Party Type', key: 'partyType', align: 'center' },
+          { header: 'Party Name', key: 'partyName' },
+          { header: 'Method', key: 'paymentMethod', align: 'center' },
+          { header: 'Amount', key: 'amount', align: 'right', format: 'currency' },
+          { header: 'Reference', key: 'reference' },
+        ],
+        rows: paymentsReportData,
+        summaryMetrics: [
+          { label: 'Total Payments', value: totalPay, isCurrency: true },
+          { label: 'Total Transactions', value: paymentsReportData.length },
+        ],
+        tenant: currentTenant,
+      });
+    }
   };
 
   // Current report list for pagination

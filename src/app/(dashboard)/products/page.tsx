@@ -22,7 +22,8 @@ import { Select } from '@/components/ui/Select';
 import { formatCurrency, formatDate } from '@/lib/utils';
 import { ProductDetailModal } from '@/components/products/ProductDetailModal';
 import { StockAdjustmentModal } from '@/components/products/StockAdjustmentModal';
-import { printStockAdjustmentSlip } from '@/lib/pdfPrint';
+import { printStockAdjustmentSlip, printBarcodeLabels } from '@/lib/pdfPrint';
+import { generateNextSKU, generateNextBarcode } from '@/lib/sequenceGenerator';
 import {
   Plus,
   Package,
@@ -196,8 +197,10 @@ export default function ProductsPage() {
   const openCreateProductModal = () => {
     setEditingProduct(null);
     setName('');
-    setSku(`SKU-${Math.floor(1000 + Math.random() * 9000)}`);
-    setBarcode(String(Math.floor(100000000000 + Math.random() * 900000000000)));
+    const nextSku = generateNextSKU(products.map((p) => p.sku));
+    const nextBarcode = generateNextBarcode(products.map((p) => p.barcode));
+    setSku(nextSku);
+    setBarcode(nextBarcode);
     setCategory(categories[0]?.name || 'General Machinery');
     setUnit('pcs');
     setCostPrice('45.00');
@@ -572,6 +575,28 @@ export default function ProductsPage() {
         subtitle={`Transaction-based inventory management for ${currentTenant?.name} (${currentTenant?.code})`}
         actions={
           <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                const itemsToPrint = (displayedProducts.length > 0 ? displayedProducts : products).map((p) => ({
+                  name: p.name,
+                  sku: p.sku,
+                  barcode: p.barcode || p.sku,
+                  sellingPrice: p.sellingPrice,
+                  category: p.category,
+                  unit: p.unit,
+                  quantity: 1,
+                }));
+                if (itemsToPrint.length > 0) {
+                  printBarcodeLabels(itemsToPrint, currentTenant);
+                }
+              }}
+              className="text-xs font-semibold"
+            >
+              <Barcode className="w-4 h-4 mr-1 text-slate-700" />
+              Print Barcodes
+            </Button>
             <Button
               size="sm"
               variant="outline"

@@ -15,6 +15,7 @@ import { formatCurrency, formatDate } from '@/lib/utils';
 import { Plus, Building2, Mail, Phone, MapPin, CreditCard, AlertCircle } from 'lucide-react';
 import { SupplierDetailModal } from '@/components/suppliers/SupplierDetailModal';
 import { useToast } from '@/context/ToastContext';
+import { generateNextSupplierCode } from '@/lib/sequenceGenerator';
 
 export default function SuppliersPage() {
   const { currentTenant } = useTenant();
@@ -104,7 +105,8 @@ export default function SuppliersPage() {
   const openCreateModal = () => {
     setEditingSupplier(null);
     setName('');
-    setCode(`SUPP-${Math.floor(100 + Math.random() * 900)}`);
+    const nextCode = generateNextSupplierCode(suppliers.map((s) => s.code));
+    setCode(nextCode);
     setCompanyName('');
     setEmail('');
     setPhone('');

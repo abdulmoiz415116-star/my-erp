@@ -22,6 +22,7 @@ import { Input } from '@/components/ui/Input';
 import { Select } from '@/components/ui/Select';
 import { formatCurrency, formatDate } from '@/lib/utils';
 import { printPaymentReceipt, printAccountStatement } from '@/lib/pdfPrint';
+import { generateNextAccountNumber } from '@/lib/sequenceGenerator';
 import {
   Plus,
   Building2,
@@ -191,7 +192,8 @@ export default function AccountsPage() {
   const handleOpenAddModal = () => {
     setEditingAccount(null);
     setAccountName('');
-    setAccountNumber(`ACC-${Math.floor(1000 + Math.random() * 9000)}`);
+    const nextAcc = generateNextAccountNumber(allAccounts.map((a) => a.accountNumber));
+    setAccountNumber(nextAcc);
     setType('bank');
     setCurrency(currencyCode);
     setOpeningBalance('0');
