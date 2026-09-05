@@ -2,8 +2,8 @@
 
 import React, { useState, useMemo } from 'react';
 import { useTenant } from '@/context/TenantContext';
-import { SupplierService, PurchaseService, PaymentService, calculateSupplierCurrentBalance } from '@/services/erp.service';
-import { Supplier, PurchaseOrder, Payment } from '@/types/erp';
+import { SupplierService, PurchaseService, PaymentService, AccountService, calculateSupplierCurrentBalance } from '@/services/erp.service';
+import { Supplier, PurchaseOrder, Payment, Account } from '@/types/erp';
 import { useRealtimeCollection } from '@/hooks/useRealtimeCollection';
 import { PageHeader } from '@/components/common/PageHeader';
 import { DataTable, Column } from '@/components/common/DataTable';
@@ -19,6 +19,7 @@ import { useToast } from '@/context/ToastContext';
 export default function SuppliersPage() {
   const { currentTenant } = useTenant();
   const { showToast } = useToast();
+  const tenantId = currentTenant?.id || 'tenant-apex-corp';
 
   const {
     items: suppliers,
@@ -46,8 +47,9 @@ export default function SuppliersPage() {
     sortDirection: 'desc',
   });
 
-  const { allItems: purchases } = useRealtimeCollection<PurchaseOrder>((tenantId) => new PurchaseService(tenantId));
+  const { allItems: purchases, updateItem: updatePurchase } = useRealtimeCollection<PurchaseOrder>((tenantId) => new PurchaseService(tenantId));
   const { allItems: payments, createItem: createPayment } = useRealtimeCollection<Payment>((tenantId) => new PaymentService(tenantId));
+  const { allItems: accounts } = useRealtimeCollection<Account>((tenantId) => new AccountService(tenantId));
 
   const currencySymbol = currentTenant?.settings.currencySymbol || '$';
   const currencyCode = currentTenant?.settings.currency || 'USD';
@@ -65,6 +67,7 @@ export default function SuppliersPage() {
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [payingSupplier, setPayingSupplier] = useState<Supplier | null>(null);
   const [paymentAmount, setPaymentAmount] = useState('');
+  const [selectedAccountId, setSelectedAccountId] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<'bank_transfer' | 'cash' | 'credit_card' | 'cheque'>('bank_transfer');
   const [paymentReference, setPaymentReference] = useState('');
   const [paymentNotes, setPaymentNotes] = useState('');
@@ -149,6 +152,8 @@ export default function SuppliersPage() {
     setPaymentAmount(balance > 0 ? String(balance) : '');
     setPaymentReference(`ACH-${Math.floor(100000 + Math.random() * 900000)}`);
     setPaymentNotes('');
+    const defaultAcc = accounts.find((a) => a.isDefault && a.status === 'active') || accounts.find((a) => a.status === 'active');
+    setSelectedAccountId(defaultAcc?.id || '');
     setPaymentModalOpen(true);
   };
 
@@ -245,6 +250,11 @@ export default function SuppliersPage() {
 
     setSubmittingPayment(true);
     try {
+      const activeAccounts = accounts.filter((a) => a.status === 'active' && !a.isDeleted);
+      const targetAcc = activeAccounts.find((a) => a.id === selectedAccountId) ||
+                        activeAccounts.find((a) => a.isDefault) ||
+                        activeAccounts[0];
+
       await createPayment({
         paymentNumber: `PMT-${Math.floor(1000 + Math.random() * 9000)}`,
         partyType: 'supplier',
@@ -253,16 +263,51 @@ export default function SuppliersPage() {
         type: 'payment',
         amount: parsedAmount,
         date: new Date().toISOString(),
-        accountId: 'acc-001',
-        accountName: 'Bank of America — Primary Operating',
+        accountId: targetAcc?.id || 'acc-001',
+        accountName: targetAcc?.accountName || 'Primary Operating Account',
         paymentMethod,
         reference: paymentReference || undefined,
         notes: paymentNotes || `Disbursement to ${payingSupplier.name}`,
         status: 'active',
       });
 
+      // 1. Update Account balance in real-time
+      if (targetAcc) {
+        const accService = new AccountService(tenantId);
+        await accService.update(targetAcc.id, {
+          currentBalance: (targetAcc.currentBalance || 0) - parsedAmount,
+        });
+      }
+
+      // 2. Auto-allocate across supplier's oldest unpaid purchase orders
+      let remainingToAllocate = parsedAmount;
+      const unpaidPOs = purchases
+        .filter((p) => p.supplierId === payingSupplier.id && p.paymentStatus !== 'paid' && p.purchaseStatus !== 'draft' && p.purchaseStatus !== 'void' && !p.isDeleted)
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+      for (const po of unpaidPOs) {
+        if (remainingToAllocate <= 0) break;
+        const unpaidOnPO = po.balanceAmount > 0 ? po.balanceAmount : Math.max(0, po.totalAmount - (po.paidAmount || 0));
+        const alloc = Math.min(remainingToAllocate, unpaidOnPO);
+        const newPaid = (po.paidAmount || 0) + alloc;
+        const newBalance = Math.max(0, po.totalAmount - newPaid);
+        const newStatus = newPaid >= po.totalAmount ? 'paid' : 'partial';
+
+        await updatePurchase(po.id, {
+          paidAmount: newPaid,
+          balanceAmount: newBalance,
+          paymentStatus: newStatus,
+        });
+        remainingToAllocate -= alloc;
+      }
+
+      // 3. Update supplier's current balance
+      await updateItem(payingSupplier.id, {
+        currentBalance: Math.max(0, (payingSupplier.currentBalance || 0) - parsedAmount),
+      });
+
       showToast(
-        `Payment of ${formatCurrency(parsedAmount, currencyCode, currencySymbol)} disbursed. Supplier payable balance updated in real-time!`,
+        `Payment of ${formatCurrency(parsedAmount, currencyCode, currencySymbol)} disbursed. Supplier & accounts updated in real-time!`,
         'success'
       );
       setPaymentModalOpen(false);
@@ -457,6 +502,18 @@ export default function SuppliersPage() {
             onChange={(e) => setPaymentAmount(e.target.value)}
             placeholder="0.00"
             required
+          />
+
+          <Select
+            label="Disburse From Account"
+            value={selectedAccountId}
+            onChange={(e) => setSelectedAccountId(e.target.value)}
+            options={accounts
+              .filter((a) => a.status === 'active' && !a.isDeleted)
+              .map((a) => ({
+                value: a.id,
+                label: `${a.accountName} (${formatCurrency(a.currentBalance || 0, currencyCode, currencySymbol)})`,
+              }))}
           />
 
           <div className="grid grid-cols-2 gap-3">

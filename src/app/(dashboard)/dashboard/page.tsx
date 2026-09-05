@@ -14,8 +14,13 @@ import {
   ProductService,
   AuditLogService,
   StockTransactionService,
+  PaymentService,
   calculateProductCurrentStock,
+  calculateCustomerCurrentBalance,
+  calculateSupplierCurrentBalance,
+  calculateAccountCurrentBalance,
 } from '@/services/erp.service';
+import { Payment } from '@/types/erp';
 import {
   DollarSign,
   ShoppingCart,
@@ -29,6 +34,9 @@ import {
   AlertTriangle,
   ArrowUpRight,
   ArrowDownRight,
+  ArrowDownLeft,
+  CreditCard,
+  CheckCircle2,
   Calendar,
   Activity,
   Filter,
@@ -77,6 +85,9 @@ export default function DashboardOverviewPage() {
   );
   const { allItems: stockTransactions } = useRealtimeCollection(
     (tenantId) => new StockTransactionService(tenantId)
+  );
+  const { allItems: payments, loading: paymentsLoading } = useRealtimeCollection<Payment>(
+    (tenantId) => new PaymentService(tenantId)
   );
 
   const currencySymbol = currentTenant?.settings.currencySymbol || '$';
@@ -129,9 +140,28 @@ export default function DashboardOverviewPage() {
   );
   const filteredPurchases = useMemo(() => purchases.filter((p) => isDateInFilter(p.date)), [purchases, dateFilter, customStartDate, customEndDate]);
   const filteredExpenses = useMemo(() => expenses.filter((e) => isDateInFilter(e.date)), [expenses, dateFilter, customStartDate, customEndDate]);
+  const filteredPayments = useMemo(
+    () => payments.filter((p) => !p.isDeleted && p.status !== 'inactive' && isDateInFilter(p.date)),
+    [payments, dateFilter, customStartDate, customEndDate]
+  );
 
   // LIVE DATABASE CALCULATIONS (NEVER HARDCODED)
   const totalSales = useMemo(() => filteredSales.reduce((acc, s) => acc + (s.totalAmount || 0), 0), [filteredSales]);
+  const totalSalesCollected = useMemo(() => filteredSales.reduce((acc, s) => acc + (s.paidAmount || 0), 0), [filteredSales]);
+  const totalSalesPending = useMemo(() => filteredSales.reduce((acc, s) => acc + (s.balanceAmount || 0), 0), [filteredSales]);
+
+  // Total cash & bank payments received/collected from receipts in this period
+  const totalPaymentsReceived = useMemo(
+    () => filteredPayments.filter((p) => p.type === 'receipt').reduce((acc, p) => acc + (p.amount || 0), 0),
+    [filteredPayments]
+  );
+
+  // Total disbursements paid out in this period
+  const totalPaymentsDisbursed = useMemo(
+    () => filteredPayments.filter((p) => p.type === 'payment').reduce((acc, p) => acc + (p.amount || 0), 0),
+    [filteredPayments]
+  );
+
   const totalPurchases = useMemo(() => filteredPurchases.reduce((acc, p) => acc + (p.totalAmount || 0), 0), [filteredPurchases]);
   const totalExpenses = useMemo(() => filteredExpenses.reduce((acc, e) => acc + (e.totalAmount || 0), 0), [filteredExpenses]);
 
@@ -151,24 +181,36 @@ export default function DashboardOverviewPage() {
   // Net Profit = Gross Profit - Operating Expenses
   const netProfit = grossProfit - totalExpenses;
 
-  // Real-time Liquidity & Position Balances
+  // Real-time Liquidity & Position Balances (Live-calculated from active accounts and payment transactions)
   const cashBalance = useMemo(
-    () => accounts.filter((a) => a.type === 'cash' && a.status === 'active').reduce((acc, a) => acc + (a.currentBalance || 0), 0),
-    [accounts]
+    () =>
+      accounts
+        .filter((a) => a.type === 'cash' && a.status === 'active' && !a.isDeleted)
+        .reduce((acc, a) => acc + calculateAccountCurrentBalance(a, payments), 0),
+    [accounts, payments]
   );
   const bankBalance = useMemo(
-    () => accounts.filter((a) => a.type === 'bank' && a.status === 'active').reduce((acc, a) => acc + (a.currentBalance || 0), 0),
-    [accounts]
+    () =>
+      accounts
+        .filter((a) => a.type === 'bank' && a.status === 'active' && !a.isDeleted)
+        .reduce((acc, a) => acc + calculateAccountCurrentBalance(a, payments), 0),
+    [accounts, payments]
   );
 
-  // Receivables & Payables
+  // Receivables & Payables (Dynamically derived from invoices and payment receipts)
   const customerReceivables = useMemo(
-    () => customers.filter((c) => c.status === 'active').reduce((acc, c) => acc + (c.currentBalance || 0), 0),
-    [customers]
+    () =>
+      customers
+        .filter((c) => c.status === 'active' && !c.isDeleted)
+        .reduce((acc, c) => acc + Math.max(0, calculateCustomerCurrentBalance(c, sales, payments)), 0),
+    [customers, sales, payments]
   );
   const supplierPayables = useMemo(
-    () => suppliers.filter((s) => s.status === 'active').reduce((acc, s) => acc + (s.currentBalance || 0), 0),
-    [suppliers]
+    () =>
+      suppliers
+        .filter((s) => s.status === 'active' && !s.isDeleted)
+        .reduce((acc, s) => acc + Math.max(0, calculateSupplierCurrentBalance(s, purchases, payments)), 0),
+    [suppliers, purchases, payments]
   );
 
   // Products & Inventory
@@ -188,6 +230,10 @@ export default function DashboardOverviewPage() {
     () => [...sales].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 5),
     [sales]
   );
+  const recentPayments = useMemo(
+    () => [...payments].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 5),
+    [payments]
+  );
   const recentPurchases = useMemo(
     () => [...purchases].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).slice(0, 5),
     [purchases]
@@ -197,7 +243,8 @@ export default function DashboardOverviewPage() {
     [expenses]
   );
 
-  const isDataLoading = salesLoading || purchasesLoading || expensesLoading || accountsLoading;
+  const isDataLoading = salesLoading || purchasesLoading || expensesLoading || accountsLoading || paymentsLoading;
+
 
   return (
     <div className="space-y-6 pb-16">
@@ -281,13 +328,14 @@ export default function DashboardOverviewPage() {
 
         <div className="text-xs text-slate-500 font-mono">
           Showing: <span className="font-bold text-slate-800">{filteredSales.length}</span> sales •{' '}
+          <span className="font-bold text-emerald-600">{filteredPayments.length}</span> payments •{' '}
           <span className="font-bold text-slate-800">{filteredPurchases.length}</span> purchases •{' '}
           <span className="font-bold text-slate-800">{filteredExpenses.length}</span> expenses
         </div>
       </div>
 
-      {/* PRIMARY FINANCIAL KPIS (Row 1: Sales, Purchases, Expenses, Gross Profit, Net Profit) */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+      {/* PRIMARY FINANCIAL KPIS (Row 1: Sales, Total Collected, Purchases, Expenses, Gross Profit, Net Profit) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
         {/* Total Sales */}
         <div className="p-4 rounded-xl bg-white border border-slate-200 shadow-2xs">
           <div className="flex items-center justify-between text-slate-500 text-xs font-medium">
@@ -301,8 +349,26 @@ export default function DashboardOverviewPage() {
               {isDataLoading ? '...' : formatCurrency(totalSales, currencyCode, currencySymbol)}
             </span>
           </div>
-          <p className="text-[11px] text-slate-400 mt-2 font-mono">
-            {filteredSales.length} invoices in period
+          <p className="text-[11px] text-slate-400 mt-2 font-mono truncate">
+            Rec: {formatCurrency(totalSalesCollected, currencyCode, currencySymbol)} • Due: {formatCurrency(totalSalesPending, currencyCode, currencySymbol)}
+          </p>
+        </div>
+
+        {/* Total Collected / Received (New Real-time Synced KPI) */}
+        <div className="p-4 rounded-xl bg-emerald-50/40 border border-emerald-200 shadow-2xs">
+          <div className="flex items-center justify-between text-xs font-medium">
+            <span className="text-emerald-800 font-semibold">Total Collected</span>
+            <div className="p-2 rounded-lg bg-emerald-100 text-emerald-700">
+              <ArrowDownLeft className="w-4 h-4" />
+            </div>
+          </div>
+          <div className="mt-2">
+            <span className="text-xl font-bold text-emerald-700">
+              {isDataLoading ? '...' : formatCurrency(totalPaymentsReceived, currencyCode, currencySymbol)}
+            </span>
+          </div>
+          <p className="text-[11px] text-emerald-600 mt-2 font-mono">
+            {filteredPayments.filter((p) => p.type === 'receipt').length} receipts recorded
           </p>
         </div>
 
@@ -374,7 +440,7 @@ export default function DashboardOverviewPage() {
             </span>
           </div>
           <p className="text-[11px] text-slate-500 mt-2">
-            Gross minus Operating Expenses
+            Gross minus Expenses
           </p>
         </div>
       </div>
@@ -418,7 +484,7 @@ export default function DashboardOverviewPage() {
             </div>
           </div>
           <p className="text-lg font-bold text-amber-600 mt-1.5">
-            {custLoading ? '...' : formatCurrency(customerReceivables, currencyCode, currencySymbol)}
+            {custLoading || paymentsLoading ? '...' : formatCurrency(customerReceivables, currencyCode, currencySymbol)}
           </p>
           <span className="text-[10px] text-slate-400 block mt-1">Pending from Customers</span>
         </div>
@@ -432,7 +498,7 @@ export default function DashboardOverviewPage() {
             </div>
           </div>
           <p className="text-lg font-bold text-rose-600 mt-1.5">
-            {suppLoading ? '...' : formatCurrency(supplierPayables, currencyCode, currencySymbol)}
+            {suppLoading || paymentsLoading ? '...' : formatCurrency(supplierPayables, currencyCode, currencySymbol)}
           </p>
           <span className="text-[10px] text-slate-400 block mt-1">Owed to Vendors</span>
         </div>
@@ -466,8 +532,8 @@ export default function DashboardOverviewPage() {
         </div>
       </div>
 
-      {/* RECENT REAL-TIME TRANSACTION FEEDS (Sales, Purchases, Expenses) */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      {/* RECENT REAL-TIME TRANSACTION FEEDS (Sales, Payments, Purchases, Expenses) */}
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-6">
         {/* RECENT SALES */}
         <div className="bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden flex flex-col">
           <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
@@ -478,7 +544,7 @@ export default function DashboardOverviewPage() {
               </h3>
             </div>
             <Link
-              href="/customers"
+              href="/sales"
               className="text-[11px] font-semibold text-indigo-600 hover:text-indigo-700 flex items-center gap-1"
             >
               All Invoices
@@ -515,6 +581,57 @@ export default function DashboardOverviewPage() {
             ))}
             {recentSales.length === 0 && (
               <div className="py-8 text-center text-xs text-slate-400">No sale transactions registered.</div>
+            )}
+          </div>
+        </div>
+
+        {/* RECENT PAYMENTS & RECEIPTS (Real-time Live Sync) */}
+        <div className="bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden flex flex-col">
+          <div className="p-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+            <div className="flex items-center gap-2">
+              <CreditCard className="w-4 h-4 text-emerald-600" />
+              <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider font-mono">
+                Recent Payments
+              </h3>
+            </div>
+            <Link
+              href="/payments"
+              className="text-[11px] font-semibold text-emerald-600 hover:text-emerald-700 flex items-center gap-1"
+            >
+              All Payments
+              <ArrowRight className="w-3 h-3" />
+            </Link>
+          </div>
+
+          <div className="divide-y divide-slate-100 flex-1">
+            {recentPayments.map((pay) => (
+              <div key={pay.id} className="p-3.5 flex items-center justify-between hover:bg-slate-50/80 transition-colors">
+                <div className="min-w-0 pr-2">
+                  <div className="flex items-center gap-2">
+                    <span className="font-mono text-xs font-bold text-slate-800">{pay.paymentNumber}</span>
+                    <span className={`text-[10px] px-1.5 py-0.2 rounded font-semibold uppercase ${
+                      pay.type === 'receipt' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'
+                    }`}>
+                      {pay.type === 'receipt' ? 'Receipt' : pay.type === 'transfer' ? 'Transfer' : 'Payment'}
+                    </span>
+                  </div>
+                  <p className="text-xs text-slate-600 truncate mt-0.5">{pay.partyName || pay.accountName}</p>
+                  <p className="text-[10px] text-slate-400 font-mono mt-0.5">{new Date(pay.date).toLocaleDateString()}</p>
+                </div>
+                <div className="text-right shrink-0">
+                  <span className={`text-xs font-bold block ${
+                    pay.type === 'receipt' ? 'text-emerald-600' : 'text-rose-600'
+                  }`}>
+                    {pay.type === 'receipt' ? '+' : '-'}{formatCurrency(pay.amount, currencyCode, currencySymbol)}
+                  </span>
+                  <span className="text-[10px] text-slate-400 font-mono">
+                    {pay.paymentMethod ? pay.paymentMethod.replace('_', ' ') : pay.accountName}
+                  </span>
+                </div>
+              </div>
+            ))}
+            {recentPayments.length === 0 && (
+              <div className="py-8 text-center text-xs text-slate-400">No payment transactions registered.</div>
             )}
           </div>
         </div>
@@ -577,9 +694,13 @@ export default function DashboardOverviewPage() {
                 Recent Expenses
               </h3>
             </div>
-            <span className="text-[11px] font-mono text-slate-400">
-              Live Feed
-            </span>
+            <Link
+              href="/expenses"
+              className="text-[11px] font-semibold text-rose-600 hover:text-rose-700 flex items-center gap-1"
+            >
+              All Expenses
+              <ArrowRight className="w-3 h-3" />
+            </Link>
           </div>
 
           <div className="divide-y divide-slate-100 flex-1">
@@ -611,6 +732,7 @@ export default function DashboardOverviewPage() {
           </div>
         </div>
       </div>
+
 
       {/* BOTTOM SECTION: Live Immutable Audit Trail */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-2xs overflow-hidden">

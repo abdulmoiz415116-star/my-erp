@@ -2,8 +2,8 @@
 
 import React, { useState, useMemo } from 'react';
 import { useTenant } from '@/context/TenantContext';
-import { CustomerService, SaleService, PaymentService, calculateCustomerCurrentBalance } from '@/services/erp.service';
-import { Customer, SaleInvoice, Payment } from '@/types/erp';
+import { CustomerService, SaleService, PaymentService, AccountService, calculateCustomerCurrentBalance } from '@/services/erp.service';
+import { Customer, SaleInvoice, Payment, Account } from '@/types/erp';
 import { useRealtimeCollection } from '@/hooks/useRealtimeCollection';
 import { PageHeader } from '@/components/common/PageHeader';
 import { DataTable, Column } from '@/components/common/DataTable';
@@ -19,6 +19,7 @@ import { useToast } from '@/context/ToastContext';
 export default function CustomersPage() {
   const { currentTenant } = useTenant();
   const { showToast } = useToast();
+  const tenantId = currentTenant?.id || 'tenant-apex-corp';
 
   const {
     items: customers,
@@ -46,8 +47,9 @@ export default function CustomersPage() {
     sortDirection: 'desc',
   });
 
-  const { allItems: sales } = useRealtimeCollection<SaleInvoice>((tenantId) => new SaleService(tenantId));
+  const { allItems: sales, updateItem: updateSale } = useRealtimeCollection<SaleInvoice>((tenantId) => new SaleService(tenantId));
   const { allItems: payments, createItem: createPayment } = useRealtimeCollection<Payment>((tenantId) => new PaymentService(tenantId));
+  const { allItems: accounts } = useRealtimeCollection<Account>((tenantId) => new AccountService(tenantId));
 
   const currencySymbol = currentTenant?.settings.currencySymbol || '$';
   const currencyCode = currentTenant?.settings.currency || 'USD';
@@ -65,6 +67,7 @@ export default function CustomersPage() {
   const [paymentModalOpen, setPaymentModalOpen] = useState(false);
   const [payingCustomer, setPayingCustomer] = useState<Customer | null>(null);
   const [paymentAmount, setPaymentAmount] = useState('');
+  const [selectedAccountId, setSelectedAccountId] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<'bank_transfer' | 'cash' | 'credit_card' | 'cheque'>('bank_transfer');
   const [paymentReference, setPaymentReference] = useState('');
   const [paymentNotes, setPaymentNotes] = useState('');
@@ -146,6 +149,8 @@ export default function CustomersPage() {
     setPaymentAmount(balance > 0 ? String(balance) : '');
     setPaymentReference(`WIRE-${Math.floor(100000 + Math.random() * 900000)}`);
     setPaymentNotes('');
+    const defaultAcc = accounts.find((a) => a.isDefault && a.status === 'active') || accounts.find((a) => a.status === 'active');
+    setSelectedAccountId(defaultAcc?.id || '');
     setPaymentModalOpen(true);
   };
 
@@ -158,60 +163,64 @@ export default function CustomersPage() {
       const parsedOpeningBalance = parseFloat(openingBalance) || 0;
       const parsedCreditLimit = parseFloat(creditLimit) || 0;
 
-      const payload = {
-        name,
-        code,
-        companyName: companyName || name,
-        email: email || undefined,
-        phone: phone || undefined,
-        taxNumber: taxNumber || undefined,
-        openingBalance: parsedOpeningBalance,
-        creditLimit: parsedCreditLimit,
-        currentBalance: parsedOpeningBalance, // Initial balance starts at opening, then calculated dynamically
-        address: {
-          street: street || undefined,
-          city: city || undefined,
-          state: state || undefined,
-          postalCode: postalCode || undefined,
-          country: country || 'USA',
-        },
-        notes: notes || undefined,
-      };
-
       if (editingCustomer) {
-        await updateItem(editingCustomer.id, payload);
+        await updateItem(editingCustomer.id, {
+          name,
+          companyName: companyName || undefined,
+          email: email || undefined,
+          phone: phone || undefined,
+          taxNumber: taxNumber || undefined,
+          creditLimit: parsedCreditLimit,
+          openingBalance: parsedOpeningBalance,
+          address: {
+            street,
+            city,
+            state,
+            postalCode,
+            country,
+          },
+          notes: notes || undefined,
+        });
         showToast(`Customer "${name}" updated successfully`, 'success');
       } else {
         await createItem({
-          ...payload,
+          name,
+          code,
+          companyName: companyName || undefined,
+          email: email || undefined,
+          phone: phone || undefined,
+          taxNumber: taxNumber || undefined,
+          creditLimit: parsedCreditLimit,
+          openingBalance: parsedOpeningBalance,
+          currentBalance: parsedOpeningBalance,
           status: 'active',
+          address: {
+            street,
+            city,
+            state,
+            postalCode,
+            country,
+          },
+          notes: notes || undefined,
         });
         showToast(`Customer "${name}" created successfully`, 'success');
       }
       setModalOpen(false);
     } catch (err) {
       console.error(err);
-      showToast('Error saving customer', 'error');
+      showToast('Failed to save customer', 'error');
     } finally {
       setSubmitting(false);
     }
   };
 
-  // Safe Deletion Guard
   const handleSafeDelete = async (id: string) => {
-    const cust = customersWithCalculatedBalances.find((c) => c.id === id);
+    const cust = customers.find((c) => c.id === id);
     if (!cust) return;
 
-    if (cust.currentBalance !== 0) {
-      showToast(
-        `Cannot delete ${cust.name}: Customer has an active outstanding balance of ${formatCurrency(cust.currentBalance, currencyCode, currencySymbol)}. Settle balance first.`,
-        'warning'
-      );
-      return;
-    }
-
-    const hasInvoices = sales.some((s) => s.customerId === id && !s.isDeleted);
-    if (hasInvoices) {
+    // Invariant: cannot delete customer with active sales
+    const hasSales = sales.some((s) => s.customerId === id && !s.isDeleted);
+    if (hasSales) {
       showToast(
         `Cannot delete ${cust.name}: Customer is linked to existing invoice records. Consider setting status to Inactive instead.`,
         'warning'
@@ -241,6 +250,11 @@ export default function CustomersPage() {
 
     setSubmittingPayment(true);
     try {
+      const activeAccounts = accounts.filter((a) => a.status === 'active' && !a.isDeleted);
+      const targetAcc = activeAccounts.find((a) => a.id === selectedAccountId) ||
+                        activeAccounts.find((a) => a.isDefault) ||
+                        activeAccounts[0];
+
       await createPayment({
         paymentNumber: `RCPT-${Math.floor(1000 + Math.random() * 9000)}`,
         partyType: 'customer',
@@ -249,16 +263,51 @@ export default function CustomersPage() {
         type: 'receipt',
         amount: parsedAmount,
         date: new Date().toISOString(),
-        accountId: 'acc-001',
-        accountName: 'Bank of America — Primary Operating',
+        accountId: targetAcc?.id || 'acc-001',
+        accountName: targetAcc?.accountName || 'Primary Operating Account',
         paymentMethod,
         reference: paymentReference || undefined,
         notes: paymentNotes || `Receipt from ${payingCustomer.name}`,
         status: 'active',
       });
 
+      // 1. Update Account balance in real-time
+      if (targetAcc) {
+        const accService = new AccountService(tenantId);
+        await accService.update(targetAcc.id, {
+          currentBalance: (targetAcc.currentBalance || 0) + parsedAmount,
+        });
+      }
+
+      // 2. Auto-allocate payment across customer's oldest unpaid invoices
+      let remainingToAllocate = parsedAmount;
+      const unpaidInvoices = sales
+        .filter((s) => s.customerId === payingCustomer.id && s.paymentStatus !== 'paid' && s.saleStatus !== 'draft' && s.saleStatus !== 'void' && !s.isDeleted)
+        .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+      for (const inv of unpaidInvoices) {
+        if (remainingToAllocate <= 0) break;
+        const unpaidOnInv = inv.balanceAmount > 0 ? inv.balanceAmount : Math.max(0, inv.totalAmount - (inv.paidAmount || 0));
+        const alloc = Math.min(remainingToAllocate, unpaidOnInv);
+        const newPaid = (inv.paidAmount || 0) + alloc;
+        const newBalance = Math.max(0, inv.totalAmount - newPaid);
+        const newStatus = newPaid >= inv.totalAmount ? 'paid' : 'partial';
+
+        await updateSale(inv.id, {
+          paidAmount: newPaid,
+          balanceAmount: newBalance,
+          paymentStatus: newStatus,
+        });
+        remainingToAllocate -= alloc;
+      }
+
+      // 3. Update customer's current balance
+      await updateItem(payingCustomer.id, {
+        currentBalance: Math.max(0, (payingCustomer.currentBalance || 0) - parsedAmount),
+      });
+
       showToast(
-        `Receipt of ${formatCurrency(parsedAmount, currencyCode, currencySymbol)} recorded. Customer balance updated in real-time!`,
+        `Receipt of ${formatCurrency(parsedAmount, currencyCode, currencySymbol)} recorded. Customer & accounts updated in real-time!`,
         'success'
       );
       setPaymentModalOpen(false);
@@ -458,6 +507,18 @@ export default function CustomersPage() {
             onChange={(e) => setPaymentAmount(e.target.value)}
             placeholder="0.00"
             required
+          />
+
+          <Select
+            label="Deposit Into Account"
+            value={selectedAccountId}
+            onChange={(e) => setSelectedAccountId(e.target.value)}
+            options={accounts
+              .filter((a) => a.status === 'active' && !a.isDeleted)
+              .map((a) => ({
+                value: a.id,
+                label: `${a.accountName} (${formatCurrency(a.currentBalance || 0, currencyCode, currencySymbol)})`,
+              }))}
           />
 
           <div className="grid grid-cols-2 gap-3">

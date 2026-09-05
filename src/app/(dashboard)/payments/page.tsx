@@ -230,36 +230,102 @@ export default function PaymentsPage() {
       let linkedInvNumber = '';
       let linkedPONumber = '';
 
-      // 1. If linked to an invoice, update invoice balances
-      if (partyType === 'customer' && selectedDocId) {
-        const inv = sales.find((s) => s.id === selectedDocId);
-        if (inv) {
-          linkedInvNumber = inv.invoiceNumber;
-          const newPaid = (inv.paidAmount || 0) + parsedAmount;
-          const newBalance = Math.max(0, inv.totalAmount - newPaid);
-          const newStatus = newPaid >= inv.totalAmount ? 'paid' : 'partial';
+      // 1. If customer payment
+      if (partyType === 'customer') {
+        if (selectedDocId) {
+          const inv = sales.find((s) => s.id === selectedDocId);
+          if (inv) {
+            linkedInvNumber = inv.invoiceNumber;
+            const newPaid = (inv.paidAmount || 0) + parsedAmount;
+            const newBalance = Math.max(0, inv.totalAmount - newPaid);
+            const newStatus = newPaid >= inv.totalAmount ? 'paid' : 'partial';
 
-          await updateSale(inv.id, {
-            paidAmount: newPaid,
-            balanceAmount: newBalance,
-            paymentStatus: newStatus,
+            await updateSale(inv.id, {
+              paidAmount: newPaid,
+              balanceAmount: newBalance,
+              paymentStatus: newStatus,
+            });
+          }
+        } else {
+          // Auto-allocate across oldest unpaid invoices
+          let remainingToAllocate = parsedAmount;
+          const unpaidInvoices = sales
+            .filter((s) => s.customerId === selectedPartyId && s.paymentStatus !== 'paid' && s.saleStatus !== 'draft' && s.saleStatus !== 'void' && !s.isDeleted)
+            .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+          for (const inv of unpaidInvoices) {
+            if (remainingToAllocate <= 0) break;
+            const unpaidOnInv = inv.balanceAmount > 0 ? inv.balanceAmount : Math.max(0, inv.totalAmount - (inv.paidAmount || 0));
+            const alloc = Math.min(remainingToAllocate, unpaidOnInv);
+            const newPaid = (inv.paidAmount || 0) + alloc;
+            const newBalance = Math.max(0, inv.totalAmount - newPaid);
+            const newStatus = newPaid >= inv.totalAmount ? 'paid' : 'partial';
+
+            await updateSale(inv.id, {
+              paidAmount: newPaid,
+              balanceAmount: newBalance,
+              paymentStatus: newStatus,
+            });
+            remainingToAllocate -= alloc;
+          }
+        }
+
+        // Real-time update to Customer balance
+        const cust = customers.find((c) => c.id === selectedPartyId);
+        if (cust) {
+          const custSvc = new CustomerService(tenantId);
+          await custSvc.update(cust.id, {
+            currentBalance: Math.max(0, (cust.currentBalance || 0) - parsedAmount),
           });
         }
       }
 
-      // 2. If linked to a purchase order, update PO balances
-      if (partyType === 'supplier' && selectedDocId) {
-        const po = purchases.find((p) => p.id === selectedDocId);
-        if (po) {
-          linkedPONumber = po.poNumber;
-          const newPaid = (po.paidAmount || 0) + parsedAmount;
-          const newBalance = Math.max(0, po.totalAmount - newPaid);
-          const newStatus = newPaid >= po.totalAmount ? 'paid' : 'partial';
+      // 2. If supplier disbursement
+      if (partyType === 'supplier') {
+        if (selectedDocId) {
+          const po = purchases.find((p) => p.id === selectedDocId);
+          if (po) {
+            linkedPONumber = po.poNumber;
+            const newPaid = (po.paidAmount || 0) + parsedAmount;
+            const newBalance = Math.max(0, po.totalAmount - newPaid);
+            const newStatus = newPaid >= po.totalAmount ? 'paid' : 'partial';
 
-          await updatePurchase(po.id, {
-            paidAmount: newPaid,
-            balanceAmount: newBalance,
-            paymentStatus: newStatus,
+            await updatePurchase(po.id, {
+              paidAmount: newPaid,
+              balanceAmount: newBalance,
+              paymentStatus: newStatus,
+            });
+          }
+        } else {
+          // Auto-allocate across oldest unpaid purchase orders
+          let remainingToAllocate = parsedAmount;
+          const unpaidPOs = purchases
+            .filter((p) => p.supplierId === selectedPartyId && p.paymentStatus !== 'paid' && p.purchaseStatus !== 'draft' && p.purchaseStatus !== 'void' && !p.isDeleted)
+            .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+          for (const po of unpaidPOs) {
+            if (remainingToAllocate <= 0) break;
+            const unpaidOnPO = po.balanceAmount > 0 ? po.balanceAmount : Math.max(0, po.totalAmount - (po.paidAmount || 0));
+            const alloc = Math.min(remainingToAllocate, unpaidOnPO);
+            const newPaid = (po.paidAmount || 0) + alloc;
+            const newBalance = Math.max(0, po.totalAmount - newPaid);
+            const newStatus = newPaid >= po.totalAmount ? 'paid' : 'partial';
+
+            await updatePurchase(po.id, {
+              paidAmount: newPaid,
+              balanceAmount: newBalance,
+              paymentStatus: newStatus,
+            });
+            remainingToAllocate -= alloc;
+          }
+        }
+
+        // Real-time update to Supplier balance
+        const supp = suppliers.find((s) => s.id === selectedPartyId);
+        if (supp) {
+          const suppSvc = new SupplierService(tenantId);
+          await suppSvc.update(supp.id, {
+            currentBalance: Math.max(0, (supp.currentBalance || 0) - parsedAmount),
           });
         }
       }

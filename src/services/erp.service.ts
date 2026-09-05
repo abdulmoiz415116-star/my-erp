@@ -302,6 +302,40 @@ export function calculateSupplierCurrentBalance(
   return opening + totalPurchasesAmount - totalPaidAmount;
 }
 
+export function calculateAccountCurrentBalance(
+  account: Account,
+  payments: Payment[]
+): number {
+  const opening = account.openingBalance || 0;
+  const activePayments = payments.filter((p) => !p.isDeleted && p.status !== 'inactive');
+
+  let inflow = 0;
+  let outflow = 0;
+
+  for (const p of activePayments) {
+    if (p.accountId === account.id) {
+      if (p.type === 'receipt') {
+        inflow += (p.amount || 0);
+      } else if (p.type === 'payment') {
+        outflow += (p.amount || 0);
+      } else if (p.type === 'transfer') {
+        outflow += (p.amount || 0);
+      }
+    }
+    // Destination account for internal transfer
+    if (p.type === 'transfer' && (p.partyId === account.id || p.reference === account.id)) {
+      inflow += (p.amount || 0);
+    }
+  }
+
+  const hasTransactions = activePayments.some(
+    (p) => p.accountId === account.id || (p.type === 'transfer' && (p.partyId === account.id || p.reference === account.id))
+  );
+
+  return hasTransactions ? (opening + inflow - outflow) : (account.currentBalance ?? opening);
+}
+
+
 export function generateCustomerLedger(
   customer: Customer,
   sales: SaleInvoice[],
