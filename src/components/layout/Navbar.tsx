@@ -23,9 +23,9 @@ export function Navbar({ onMobileMenuToggle }: NavbarProps) {
   const isLiveFirebase = isFirebaseConfigured();
 
   const handleResyncData = () => {
-    if (confirm('Re-seed and reset demo data for this tenant? All live collections will synchronize fresh sample data.')) {
+    if (confirm('Synchronize and reset system workspace data for this organization? All real-time modules will be refreshed.')) {
       localReactiveStore.resetTenantData(currentTenant?.id || 'tenant-apex-corp');
-      showToast('All demo collections re-seeded & real-time synchronized!', 'success');
+      showToast('All enterprise collections synchronized & refreshed!', 'success');
     }
   };
 
@@ -51,29 +51,29 @@ export function Navbar({ onMobileMenuToggle }: NavbarProps) {
           <span className="relative flex h-2 w-2">
             <span
               className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
-                isLiveFirebase ? 'bg-emerald-400' : 'bg-indigo-400'
+                isLiveFirebase ? 'bg-emerald-400' : 'bg-emerald-400'
               }`}
             />
             <span
               className={`relative inline-flex rounded-full h-2 w-2 ${
-                isLiveFirebase ? 'bg-emerald-500' : 'bg-indigo-600'
+                isLiveFirebase ? 'bg-emerald-500' : 'bg-emerald-500'
               }`}
             />
           </span>
-          <span className="text-[11px] font-medium text-slate-600">
-            {isLiveFirebase ? 'Firestore Realtime' : 'Local Realtime Sync'}
+          <span className="text-[11px] font-medium text-slate-700">
+            {isLiveFirebase ? 'Cloud Database Realtime' : 'Enterprise Realtime Sync'}
           </span>
         </div>
 
-        {/* Resync Demo Data Button */}
+        {/* Sync System Cache Button */}
         {!isLiveFirebase && (
           <button
             onClick={handleResyncData}
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 transition-colors shadow-2xs"
-            title="Re-seed demo data and synchronize all collections"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 border border-slate-200 transition-colors shadow-2xs"
+            title="Refresh and synchronize workspace cache"
           >
-            <RefreshCw className="w-3.5 h-3.5" />
-            <span className="hidden md:inline">Resync Demo Data</span>
+            <RefreshCw className="w-3.5 h-3.5 text-indigo-600" />
+            <span className="hidden md:inline">Sync Workspace</span>
           </button>
         )}
 

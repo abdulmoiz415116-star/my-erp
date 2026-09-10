@@ -91,27 +91,28 @@ export default function ProductsPage() {
 
   const {
     items: stockTransactions,
+    allItems: allStockTransactions,
     createItem: createStockTransaction,
   } = useRealtimeCollection<StockTransaction>((tenantId) => new StockTransactionService(tenantId), {
     sortBy: 'date',
     sortDirection: 'desc',
   });
 
-  const { items: sales } = useRealtimeCollection<SaleInvoice>((tenantId) => new SaleService(tenantId));
-  const { items: purchases } = useRealtimeCollection<PurchaseOrder>((tenantId) => new PurchaseService(tenantId));
+  const { allItems: sales } = useRealtimeCollection<SaleInvoice>((tenantId) => new SaleService(tenantId));
+  const { allItems: purchases } = useRealtimeCollection<PurchaseOrder>((tenantId) => new PurchaseService(tenantId));
 
   const currencySymbol = currentTenant?.settings.currencySymbol || '$';
   const currency = currentTenant?.settings.currency || 'USD';
   const allowNegativeInventory = currentTenant?.settings.allowNegativeInventory || false;
 
-  // Real-Time Transaction-Derived Stock Dictionary
+  // Real-Time Transaction-Derived Stock Dictionary (Calculated across entire transaction ledger)
   const productStocks = useMemo(() => {
     const dict: Record<string, number> = {};
     products.forEach((p) => {
-      dict[p.id] = calculateProductCurrentStock(p, stockTransactions);
+      dict[p.id] = calculateProductCurrentStock(p, allStockTransactions);
     });
     return dict;
-  }, [products, stockTransactions]);
+  }, [products, allStockTransactions]);
 
   // Modals State
   const [productFormOpen, setProductFormOpen] = useState(false);

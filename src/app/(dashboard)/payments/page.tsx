@@ -12,6 +12,7 @@ import {
   SaleService,
   PurchaseService,
   AuditLogService,
+  AccountingAutomationService,
 } from '@/services/erp.service';
 import { Payment, Customer, Supplier, Account, PaymentPartyType, PaymentTransactionType, SaleInvoice, PurchaseOrder } from '@/types/erp';
 import { useRealtimeCollection } from '@/hooks/useRealtimeCollection';
@@ -380,6 +381,14 @@ export default function PaymentsPage() {
         purchaseOrderNumber: linkedPONumber || undefined,
         status: 'active',
       });
+
+      // Automatic Double-Entry Journal Entry
+      try {
+        const accountingAutomation = new AccountingAutomationService(tenantId);
+        await accountingAutomation.postPayment(newPay, accounts, user?.uid || 'system');
+      } catch (jeErr) {
+        console.warn('Double-entry payment auto-posting note:', jeErr);
+      }
 
       // 4. Adjust Account Balance (Receipts add, disbursements subtract)
       const balanceDelta = isReceipt ? parsedAmount : -parsedAmount;

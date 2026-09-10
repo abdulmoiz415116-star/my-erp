@@ -48,8 +48,8 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 const DEV_MOCK_USER: ERPUser = {
   uid: 'user-default-admin',
-  email: 'admin@apex-corp.com',
-  displayName: 'Enterprise Administrator',
+  email: 'admin@omegalights.com',
+  displayName: 'Omega Admin',
   phone: '+1 (555) 019-2834',
   status: 'active',
   lastLoginAt: new Date().toISOString(),

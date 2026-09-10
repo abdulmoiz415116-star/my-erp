@@ -64,11 +64,11 @@ class LocalReactiveStore {
   private initStore() {
     if (this.isInitialized || typeof window === 'undefined') return;
     this.isInitialized = true;
-    const CURRENT_VERSION = 'v10_enterprise_prompt9_double_entry_accounting_synced';
+    const CURRENT_VERSION = 'v12_omega_lights_enterprise_live_synced';
     const currentVer = localStorage.getItem('erp_schema_version');
     if (currentVer !== CURRENT_VERSION) {
       localStorage.setItem('erp_schema_version', CURRENT_VERSION);
-      // Auto seed required collections for active demo tenants
+      // Auto seed required collections for active enterprise tenants
       ['tenant-apex-corp', 'tenant-nexus-tech'].forEach((tId) => {
         ['categories', 'stock_transactions', 'products', 'customers', 'suppliers', 'sales', 'purchases', 'expenses', 'payments', 'accounts', 'journal_entries', 'audit_logs', 'users'].forEach((mod) => {
           const seed = this.getInitialSeed<{ id: string }>(tId, mod);
@@ -76,6 +76,7 @@ class LocalReactiveStore {
           localStorage.setItem(key, JSON.stringify(seed));
         });
       });
+      localStorage.setItem(this.getStorageKey('global', 'tenants'), JSON.stringify(INITIAL_TENANTS));
     }
   }
 

@@ -99,12 +99,12 @@ export function Sidebar({ isMobileOpen, onMobileClose }: SidebarProps) {
       {/* Brand Header */}
       <div className="h-16 flex items-center justify-between px-6 border-b border-slate-800 shrink-0">
         <Link href="/dashboard" className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-lg bg-indigo-600 flex items-center justify-center text-white font-bold shadow-md shadow-indigo-500/30">
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-amber-500 to-indigo-600 flex items-center justify-center text-white font-bold shadow-md shadow-amber-500/20">
             <Layers className="w-5 h-5" />
           </div>
           <div>
-            <span className="font-bold text-white text-base tracking-tight">Antigravity ERP</span>
-            <span className="block text-[10px] text-indigo-400 font-mono font-semibold uppercase">Enterprise v1.0</span>
+            <span className="font-bold text-white text-base tracking-tight">Omega Lights ERP</span>
+            <span className="block text-[10px] text-amber-400 font-mono font-semibold uppercase">Enterprise Edition</span>
           </div>
         </Link>
         <button

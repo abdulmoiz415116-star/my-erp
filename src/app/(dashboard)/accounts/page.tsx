@@ -10,6 +10,7 @@ import {
   ExpenseService,
   AuditLogService,
   generateAccountLedger,
+  calculateAccountCurrentBalance,
   AccountLedgerEntry,
 } from '@/services/erp.service';
 import { Account, Payment, Expense } from '@/types/erp';
@@ -150,15 +151,15 @@ export default function AccountsPage() {
     const activeAccs = allAccounts.filter((a) => a.status !== 'inactive');
     const liquidTotal = activeAccs
       .filter((a) => a.type === 'cash' || a.type === 'bank')
-      .reduce((sum, a) => sum + (a.currentBalance || 0), 0);
+      .reduce((sum, a) => sum + calculateAccountCurrentBalance(a, allPayments, allExpenses), 0);
 
     const cashTotal = activeAccs
       .filter((a) => a.type === 'cash')
-      .reduce((sum, a) => sum + (a.currentBalance || 0), 0);
+      .reduce((sum, a) => sum + calculateAccountCurrentBalance(a, allPayments, allExpenses), 0);
 
     const bankTotal = activeAccs
       .filter((a) => a.type === 'bank')
-      .reduce((sum, a) => sum + (a.currentBalance || 0), 0);
+      .reduce((sum, a) => sum + calculateAccountCurrentBalance(a, allPayments, allExpenses), 0);
 
     const defaultAcc = allAccounts.find((a) => a.isDefault);
 
@@ -170,16 +171,24 @@ export default function AccountsPage() {
       count: allAccounts.length,
       activeCount: activeAccs.length,
     };
-  }, [allAccounts]);
+  }, [allAccounts, allPayments, allExpenses]);
+
+  // Map accounts to dynamically calculated transaction-derived balances
+  const accountsWithCalculatedBalances = useMemo(() => {
+    return accounts.map((acc) => ({
+      ...acc,
+      currentBalance: calculateAccountCurrentBalance(acc, allPayments, allExpenses),
+    }));
+  }, [accounts, allPayments, allExpenses]);
 
   // Filtered Accounts for DataTable view
   const filteredAccounts = useMemo(() => {
-    return accounts.filter((acc) => {
+    return accountsWithCalculatedBalances.filter((acc) => {
       if (typeFilter !== 'all' && acc.type !== typeFilter) return false;
       if (statusFilter !== 'all' && acc.status !== statusFilter) return false;
       return true;
     });
-  }, [accounts, typeFilter, statusFilter]);
+  }, [accountsWithCalculatedBalances, typeFilter, statusFilter]);
 
   // Selected Account Ledger computation (real-time synchronized)
   const currentLedger = useMemo<AccountLedgerEntry[]>(() => {

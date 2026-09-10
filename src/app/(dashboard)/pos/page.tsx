@@ -13,6 +13,7 @@ import {
   AccountService,
   CategoryService,
   AuditLogService,
+  AccountingAutomationService,
   validateStockDeduction,
 } from '@/services/erp.service';
 import { Product, Customer, Account, Category, SaleInvoice, SaleInvoiceItem } from '@/types/erp';
@@ -376,7 +377,15 @@ export default function PosPage() {
         currentBalance: (targetAccount.currentBalance || 0) + cartTotal,
       });
 
-      // 4. Save Last Completed Sale for Instant Reprint
+      // 4. Post Double-Entry Journal Entry
+      try {
+        const accountingAutomation = new AccountingAutomationService(tenantId);
+        await accountingAutomation.postSaleInvoice(newInvoice, accounts, true, user?.uid || 'pos-cashier');
+      } catch (jeErr) {
+        console.warn('Double-entry journal POS auto-posting note:', jeErr);
+      }
+
+      // 5. Save Last Completed Sale for Instant Reprint
       setLastCompletedSale({
         invoice: newInvoice,
         tendered: parsedTendered,

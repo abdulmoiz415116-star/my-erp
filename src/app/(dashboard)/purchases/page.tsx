@@ -12,6 +12,7 @@ import {
   PaymentService,
   AccountService,
   AuditLogService,
+  AccountingAutomationService,
 } from '@/services/erp.service';
 import { PurchaseOrder, PurchaseOrderItem, Supplier, Product, Account, PurchaseStatus } from '@/types/erp';
 import { useRealtimeCollection } from '@/hooks/useRealtimeCollection';
@@ -540,6 +541,18 @@ export default function PurchasesPage() {
             currentBalance: (supplier.currentBalance || 0) + finalBalance,
           });
         }
+
+        // Automatic Double-Entry Journal Entry
+        try {
+          const accountingAutomation = new AccountingAutomationService(tenantId);
+          await accountingAutomation.postPurchaseOrder(
+            { ...poPayload, id: savedPOId || trimmedPoNum } as PurchaseOrder,
+            accounts,
+            user?.uid || 'user-admin'
+          );
+        } catch (jeErr) {
+          console.warn('Double-entry purchase auto-posting note:', jeErr);
+        }
       }
 
       // Audit Log
@@ -719,6 +732,14 @@ export default function PurchasesPage() {
         }
       }
 
+      // Automatic Double-Entry Journal Reversal
+      try {
+        const accountingAutomation = new AccountingAutomationService(tenantId);
+        await accountingAutomation.reverseJournalByReference(poToVoid.poNumber, voidReason, user?.uid || 'user-admin');
+      } catch (revErr) {
+        console.warn('Double-entry journal reversal note:', revErr);
+      }
+
       // 4. Mark PO as void
       await updateItem(poToVoid.id, {
         purchaseStatus: 'void',
@@ -796,7 +817,7 @@ export default function PurchasesPage() {
       const pmtNum = `PMT-${Date.now().toString().slice(-5)}`;
 
       // 1. Auto-generate Payment record in Payment Ledger
-      await paymentService.create({
+      const disbursePayment = await paymentService.create({
         paymentNumber: pmtNum,
         partyType: 'supplier',
         partyId: poToDisburse.supplierId,
@@ -813,6 +834,14 @@ export default function PurchasesPage() {
         notes: `Disbursement for Purchase Order #${poToDisburse.poNumber}`,
         status: 'active',
       });
+
+      // Automatic Double-Entry Journal Entry
+      try {
+        const accountingAutomation = new AccountingAutomationService(tenantId);
+        await accountingAutomation.postPayment(disbursePayment, accounts, user?.uid || 'user-admin');
+      } catch (jeErr) {
+        console.warn('Double-entry payment posting note:', jeErr);
+      }
 
       // 2. Deduct from Account Balance
       if (targetAcc) {

@@ -12,6 +12,7 @@ import {
   PaymentService,
   AccountService,
   AuditLogService,
+  AccountingAutomationService,
   validateStockDeduction,
 } from '@/services/erp.service';
 import {
@@ -525,6 +526,14 @@ export default function SalesPage() {
             currentBalance: (customer.currentBalance || 0) + balanceAmountCalculated,
           });
         }
+
+        // 3. Post Automatic Double-Entry Journal Entry
+        try {
+          const accountingAutomation = new AccountingAutomationService(tenantId);
+          await accountingAutomation.postSaleInvoice(createdInvoice, accounts, false, user?.uid || 'system');
+        } catch (jeErr) {
+          console.warn('Double-entry journal auto-posting note:', jeErr);
+        }
       }
 
       // Record immutable audit log for Sale
@@ -729,6 +738,14 @@ export default function SalesPage() {
             currentBalance: (customer.currentBalance || 0) + balanceAmountCalculated,
           });
         }
+
+        // Automatic Double-Entry Journal Entry
+        try {
+          const accountingAutomation = new AccountingAutomationService(tenantId);
+          await accountingAutomation.postSaleInvoice({ ...activeTargetSale, ...updateData } as SaleInvoice, accounts, false, user?.uid || 'system');
+        } catch (jeErr) {
+          console.warn('Double-entry journal auto-posting note:', jeErr);
+        }
       }
 
       // Record immutable audit log
@@ -814,7 +831,7 @@ export default function SalesPage() {
       const rcptNum = `RCPT-${Date.now().toString().slice(-5)}`;
 
       // 1. Auto-generate Payment receipt in Payment Ledger
-      await paymentService.create({
+      const newPayRecord = await paymentService.create({
         paymentNumber: rcptNum,
         partyType: 'customer',
         partyId: invoiceToCollect.customerId,
@@ -831,6 +848,14 @@ export default function SalesPage() {
         notes: `Direct collection on Invoice #${invoiceToCollect.invoiceNumber}`,
         status: 'active',
       });
+
+      // Post Double-Entry Journal Entry
+      try {
+        const accountingAutomation = new AccountingAutomationService(tenantId);
+        await accountingAutomation.postPayment(newPayRecord, accounts, user?.uid || 'system');
+      } catch (jeErr) {
+        console.warn('Double-entry payment auto-posting note:', jeErr);
+      }
 
       // 2. Deposit into Account
       if (targetAcc) {
@@ -982,6 +1007,14 @@ export default function SalesPage() {
               currentBalance: Math.max(0, (cust.currentBalance || 0) - activeTargetSale.balanceAmount),
             });
           }
+        }
+
+        // Automatic Double-Entry Journal Reversal
+        try {
+          const accountingAutomation = new AccountingAutomationService(tenantId);
+          await accountingAutomation.reverseJournalByReference(activeTargetSale.invoiceNumber, voidReasonInput, user?.uid || 'system');
+        } catch (revErr) {
+          console.warn('Double-entry journal reversal note:', revErr);
         }
       }
 

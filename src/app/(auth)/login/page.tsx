@@ -33,11 +33,11 @@ export default function LoginPage() {
   };
 
   const handleDemoLogin = async () => {
-    setEmail('admin@apex-corp.com');
+    setEmail('admin@omegalights.com');
     setPassword('DemoPassword2026!');
     setLoading(true);
     try {
-      await signIn('admin@apex-corp.com', 'DemoPassword2026!');
+      await signIn('admin@omegalights.com', 'DemoPassword2026!');
       router.push('/dashboard');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to authenticate demo user');
@@ -123,10 +123,10 @@ export default function LoginPage() {
                 variant="secondary"
                 size="sm"
                 onClick={handleDemoLogin}
-                className="w-full mt-2.5 text-xs"
+                className="w-full mt-2.5 text-xs font-semibold text-slate-800"
                 loading={loading}
               >
-                Log In as Administrator (Apex Corp)
+                Log In as Administrator (Omega Lights)
               </Button>
             </div>
           </div>

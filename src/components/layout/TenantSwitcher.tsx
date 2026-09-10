@@ -131,7 +131,7 @@ export function TenantSwitcher() {
         <form onSubmit={handleCreateNewTenant} className="space-y-4">
           <Input
             label="Company / Business Name"
-            placeholder="e.g. Apex Global Industries"
+            placeholder="e.g. Omega Lights Intl"
             value={name}
             onChange={(e) => {
               setName(e.target.value);

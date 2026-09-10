@@ -10,6 +10,7 @@ import {
   AuditLogService,
   CategoryService,
   PaymentService,
+  AccountingAutomationService,
 } from '@/services/erp.service';
 import { Expense, Account, Category, ExpenseStatus } from '@/types/erp';
 import { useRealtimeCollection } from '@/hooks/useRealtimeCollection';
@@ -231,7 +232,7 @@ export default function ExpensesPage() {
         const payNum = `PAY-EXP-${expenseNumber}`;
         await paymentService.create({
           paymentNumber: payNum,
-          partyType: 'direct_deposit',
+          partyType: 'direct_withdrawal',
           partyId: selectedAccount.id,
           partyName: vendor ? `${category} (${vendor})` : category,
           type: 'payment',
@@ -244,6 +245,21 @@ export default function ExpensesPage() {
           notes: description || `Operating Expense: ${category}`,
           status: 'active',
         });
+
+        // Automatic Double-Entry Journal Entry
+        try {
+          const accountingAutomation = new AccountingAutomationService(tenantId);
+          await accountingAutomation.postExpense(
+            {
+              ...payload,
+              id: editingExpense ? editingExpense.id : expenseNumber,
+            } as Expense,
+            accounts,
+            user?.uid || 'system'
+          );
+        } catch (jeErr) {
+          console.warn('Double-entry expense auto-posting note:', jeErr);
+        }
 
         await auditLogService.create({
           action: editingExpense ? 'UPDATE' : 'CREATE',
@@ -318,6 +334,14 @@ export default function ExpensesPage() {
         voidReason,
         voidDate: nowStr,
       });
+
+      // Automatic Double-Entry Journal Reversal
+      try {
+        const accountingAutomation = new AccountingAutomationService(tenantId);
+        await accountingAutomation.reverseJournalByReference(expenseToVoid.expenseNumber, voidReason, user?.uid || 'system');
+      } catch (revErr) {
+        console.warn('Double-entry journal reversal note:', revErr);
+      }
 
       // 3. Audit Log
       await auditLogService.create({

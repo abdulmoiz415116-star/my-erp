@@ -304,7 +304,8 @@ export function calculateSupplierCurrentBalance(
 
 export function calculateAccountCurrentBalance(
   account: Account,
-  payments: Payment[]
+  payments: Payment[],
+  expenses: Expense[] = []
 ): number {
   const opening = account.openingBalance || 0;
   const activePayments = payments.filter((p) => !p.isDeleted && p.status !== 'inactive');
@@ -323,14 +324,25 @@ export function calculateAccountCurrentBalance(
       }
     }
     // Destination account for internal transfer
-    if (p.type === 'transfer' && (p.partyId === account.id || p.reference === account.id)) {
+    if (p.type === 'transfer' && (p.destinationAccountId === account.id || p.partyId === account.id || p.reference === account.id)) {
       inflow += (p.amount || 0);
     }
   }
 
-  const hasTransactions = activePayments.some(
-    (p) => p.accountId === account.id || (p.type === 'transfer' && (p.partyId === account.id || p.reference === account.id))
+  // Also include valid operating expenses if not recorded via payment
+  const activeExpenses = expenses.filter(
+    (e) => !e.isDeleted && e.accountId === account.id && e.expenseStatus !== 'void' && e.expenseStatus !== 'draft'
   );
+  for (const e of activeExpenses) {
+    const hasPayment = activePayments.some((p) => p.reference === e.expenseNumber || p.notes?.includes(e.expenseNumber));
+    if (!hasPayment) {
+      outflow += (e.totalAmount || e.amount || 0);
+    }
+  }
+
+  const hasTransactions = activePayments.some(
+    (p) => p.accountId === account.id || (p.type === 'transfer' && (p.destinationAccountId === account.id || p.partyId === account.id || p.reference === account.id))
+  ) || activeExpenses.length > 0;
 
   return hasTransactions ? (opening + inflow - outflow) : (account.currentBalance ?? opening);
 }
@@ -544,7 +556,12 @@ export function generateAccountLedger(
 
   // 2. Payments (Receipts, Disbursements, Transfers, Direct Deposits, Direct Withdrawals)
   const relevantPayments = payments.filter(
-    (p) => !p.isDeleted && (p.accountId === account.id || p.destinationAccountId === account.id)
+    (p) =>
+      !p.isDeleted &&
+      (p.accountId === account.id || p.destinationAccountId === account.id) &&
+      !p.paymentNumber?.startsWith('PAY-EXP-') &&
+      !p.paymentNumber?.startsWith('REFUND-EXP-') &&
+      !(p.reference && p.reference.startsWith('EXP-'))
   );
 
   relevantPayments.forEach((p) => {
@@ -899,5 +916,447 @@ export function computeProfitAndLossStatement(
     netMarginPercent,
     period,
   };
+}
+
+/**
+ * DOUBLE-ENTRY AUTOMATION SERVICE:
+ * Automatically posts balanced journal entries for Sales, POS, Purchases, Expenses, and Payments
+ */
+export class AccountingAutomationService {
+  private tenantId: string;
+  private journalService: JournalEntryService;
+
+  constructor(tenantId: string) {
+    this.tenantId = tenantId;
+    this.journalService = new JournalEntryService(tenantId);
+  }
+
+  private resolveAccount(
+    accounts: Account[],
+    targetId?: string,
+    fallbackTypes?: string[],
+    fallbackNumberPrefix?: string
+  ): Account | null {
+    if (targetId) {
+      const found = accounts.find((a) => a.id === targetId && !a.isDeleted);
+      if (found) return found;
+    }
+    if (fallbackNumberPrefix) {
+      const byNum = accounts.find((a) => a.accountNumber?.startsWith(fallbackNumberPrefix) && !a.isDeleted);
+      if (byNum) return byNum;
+    }
+    if (fallbackTypes && fallbackTypes.length > 0) {
+      const byType = accounts.find((a) => fallbackTypes.includes(a.type) && !a.isDeleted);
+      if (byType) return byType;
+    }
+    return accounts.find((a) => !a.isDeleted) || null;
+  }
+
+  async postSaleInvoice(
+    sale: SaleInvoice,
+    accounts: Account[],
+    isPos: boolean = false,
+    userId: string = 'system'
+  ): Promise<JournalEntry | null> {
+    if (sale.saleStatus === 'draft' || sale.saleStatus === 'void') return null;
+
+    const total = sale.totalAmount || 0;
+    const paid = sale.paidAmount || 0;
+    const balance = sale.balanceAmount ?? Math.max(0, total - paid);
+
+    if (total <= 0) return null;
+
+    const cashBankAcc = this.resolveAccount(accounts, sale.accountId, ['cash', 'bank'], '10');
+    const arAcc = this.resolveAccount(accounts, undefined, ['accounts_receivable'], '1100');
+    const revAcc = this.resolveAccount(accounts, undefined, ['revenue'], isPos ? '4020' : '4010');
+    const cogsAcc = this.resolveAccount(accounts, undefined, ['expense'], '5010');
+    const invAcc = this.resolveAccount(accounts, undefined, ['inventory'], '1200');
+
+    if (!revAcc) return null;
+
+    const lines: JournalLine[] = [];
+    const entryNumber = `JE-SALE-${sale.invoiceNumber}`;
+
+    // Debit: Cash/Bank for settled portion
+    if (paid > 0 && cashBankAcc) {
+      lines.push({
+        id: `line-${sale.id}-paid`,
+        accountId: cashBankAcc.id,
+        accountNumber: cashBankAcc.accountNumber,
+        accountName: cashBankAcc.accountName,
+        accountType: cashBankAcc.type,
+        debit: paid,
+        credit: 0,
+        description: `Receipt for ${sale.invoiceNumber} (${sale.customerName})`,
+      });
+    }
+
+    // Debit: Accounts Receivable for unpaid portion
+    if (balance > 0 && arAcc) {
+      lines.push({
+        id: `line-${sale.id}-ar`,
+        accountId: arAcc.id,
+        accountNumber: arAcc.accountNumber,
+        accountName: arAcc.accountName,
+        accountType: arAcc.type,
+        debit: balance,
+        credit: 0,
+        description: `Trade Receivable for ${sale.invoiceNumber} (${sale.customerName})`,
+      });
+    }
+
+    // If neither paid nor balance was pushed (e.g. edge case), fallback to AR or Cash
+    if (lines.length === 0) {
+      const fallbackDebitAcc = cashBankAcc || arAcc;
+      if (fallbackDebitAcc) {
+        lines.push({
+          id: `line-${sale.id}-deb`,
+          accountId: fallbackDebitAcc.id,
+          accountNumber: fallbackDebitAcc.accountNumber,
+          accountName: fallbackDebitAcc.accountName,
+          accountType: fallbackDebitAcc.type,
+          debit: total,
+          credit: 0,
+          description: `Settlement for ${sale.invoiceNumber}`,
+        });
+      }
+    }
+
+    // Credit: Sales Revenue
+    lines.push({
+      id: `line-${sale.id}-rev`,
+      accountId: revAcc.id,
+      accountNumber: revAcc.accountNumber,
+      accountName: revAcc.accountName,
+      accountType: revAcc.type,
+      debit: 0,
+      credit: total,
+      description: `Sales Revenue recognized for ${sale.invoiceNumber}`,
+    });
+
+    // COGS & Inventory Reduction
+    let cogsTotal = 0;
+    sale.items?.forEach((item) => {
+      cogsTotal += (item.costPrice || 0) * (item.quantity || 0);
+    });
+
+    if (cogsTotal > 0 && cogsAcc && invAcc) {
+      lines.push({
+        id: `line-${sale.id}-cogs`,
+        accountId: cogsAcc.id,
+        accountNumber: cogsAcc.accountNumber,
+        accountName: cogsAcc.accountName,
+        accountType: cogsAcc.type,
+        debit: cogsTotal,
+        credit: 0,
+        description: `COGS: Goods dispatched for ${sale.invoiceNumber}`,
+      });
+      lines.push({
+        id: `line-${sale.id}-inv`,
+        accountId: invAcc.id,
+        accountNumber: invAcc.accountNumber,
+        accountName: invAcc.accountName,
+        accountType: invAcc.type,
+        debit: 0,
+        credit: cogsTotal,
+        description: `Inventory reduction for ${sale.invoiceNumber}`,
+      });
+    }
+
+    const sumDebits = lines.reduce((s, l) => s + (l.debit || 0), 0);
+    const sumCredits = lines.reduce((s, l) => s + (l.credit || 0), 0);
+
+    return this.journalService.create({
+      entryNumber,
+      date: sale.date || new Date().toISOString(),
+      reference: sale.invoiceNumber,
+      description: `${isPos ? 'POS Retail Sale' : 'Commercial Invoice'} - ${sale.customerName}`,
+      lines,
+      totalDebit: sumDebits,
+      totalCredit: sumCredits,
+      isBalanced: Math.abs(sumDebits - sumCredits) < 0.05,
+      sourceModule: 'sales',
+      sourceId: sale.id,
+      sourceNumber: sale.invoiceNumber,
+      status: 'posted',
+      userId,
+    }, userId);
+  }
+
+  async postPurchaseOrder(
+    purchase: PurchaseOrder,
+    accounts: Account[],
+    userId: string = 'system'
+  ): Promise<JournalEntry | null> {
+    if (purchase.purchaseStatus === 'draft' || purchase.purchaseStatus === 'void') return null;
+
+    const total = purchase.totalAmount || 0;
+    const paid = purchase.paidAmount || 0;
+    const balance = purchase.balanceAmount ?? Math.max(0, total - paid);
+
+    if (total <= 0) return null;
+
+    const invAcc = this.resolveAccount(accounts, undefined, ['inventory'], '1200');
+    const apAcc = this.resolveAccount(accounts, undefined, ['accounts_payable'], '2010');
+    const cashBankAcc = this.resolveAccount(accounts, purchase.accountId, ['bank', 'cash'], '10');
+
+    if (!invAcc) return null;
+
+    const lines: JournalLine[] = [];
+    const entryNumber = `JE-PURCH-${purchase.poNumber}`;
+
+    // Debit: Inventory Asset
+    lines.push({
+      id: `line-${purchase.id}-inv`,
+      accountId: invAcc.id,
+      accountNumber: invAcc.accountNumber,
+      accountName: invAcc.accountName,
+      accountType: invAcc.type,
+      debit: total,
+      credit: 0,
+      description: `Inventory acquired via ${purchase.poNumber} (${purchase.supplierName})`,
+    });
+
+    // Credit: Cash/Bank for paid portion
+    if (paid > 0 && cashBankAcc) {
+      lines.push({
+        id: `line-${purchase.id}-paid`,
+        accountId: cashBankAcc.id,
+        accountNumber: cashBankAcc.accountNumber,
+        accountName: cashBankAcc.accountName,
+        accountType: cashBankAcc.type,
+        debit: 0,
+        credit: paid,
+        description: `Disbursement for ${purchase.poNumber} from ${cashBankAcc.accountName}`,
+      });
+    }
+
+    // Credit: AP Control for unpaid portion
+    if (balance > 0 && apAcc) {
+      lines.push({
+        id: `line-${purchase.id}-ap`,
+        accountId: apAcc.id,
+        accountNumber: apAcc.accountNumber,
+        accountName: apAcc.accountName,
+        accountType: apAcc.type,
+        debit: 0,
+        credit: balance,
+        description: `Trade Payable to ${purchase.supplierName} (${purchase.poNumber})`,
+      });
+    }
+
+    // If neither paid nor balance was added, fallback to AP
+    if (lines.length === 1 && apAcc) {
+      lines.push({
+        id: `line-${purchase.id}-ap-fallback`,
+        accountId: apAcc.id,
+        accountNumber: apAcc.accountNumber,
+        accountName: apAcc.accountName,
+        accountType: apAcc.type,
+        debit: 0,
+        credit: total,
+        description: `Trade Payable to ${purchase.supplierName}`,
+      });
+    }
+
+    const sumDebits = lines.reduce((s, l) => s + (l.debit || 0), 0);
+    const sumCredits = lines.reduce((s, l) => s + (l.credit || 0), 0);
+
+    return this.journalService.create({
+      entryNumber,
+      date: purchase.date || new Date().toISOString(),
+      reference: purchase.poNumber,
+      description: `Purchase Order Fulfillment - ${purchase.supplierName}`,
+      lines,
+      totalDebit: sumDebits,
+      totalCredit: sumCredits,
+      isBalanced: Math.abs(sumDebits - sumCredits) < 0.05,
+      sourceModule: 'purchases',
+      sourceId: purchase.id,
+      sourceNumber: purchase.poNumber,
+      status: 'posted',
+      userId,
+    }, userId);
+  }
+
+  async postExpense(
+    expense: Expense,
+    accounts: Account[],
+    userId: string = 'system'
+  ): Promise<JournalEntry | null> {
+    if (expense.expenseStatus === 'draft' || expense.expenseStatus === 'void') return null;
+
+    const total = expense.totalAmount || expense.amount || 0;
+    if (total <= 0) return null;
+
+    const cashBankAcc = this.resolveAccount(accounts, expense.accountId, ['cash', 'bank'], '10');
+    const catLower = (expense.category || '').toLowerCase();
+    let expAcc: Account | null = accounts.find((a) => a.accountCategory === 'expense' && a.accountName.toLowerCase().includes(catLower) && !a.isDeleted) || null;
+    if (!expAcc) {
+      expAcc = this.resolveAccount(accounts, undefined, ['expense'], '60');
+    }
+
+    if (!cashBankAcc || !expAcc) return null;
+
+    const lines: JournalLine[] = [];
+    const entryNumber = `JE-EXP-${expense.expenseNumber}`;
+
+    // Debit: Operating Expense Account
+    lines.push({
+      id: `line-${expense.id}-exp`,
+      accountId: expAcc.id,
+      accountNumber: expAcc.accountNumber,
+      accountName: expAcc.accountName,
+      accountType: expAcc.type,
+      debit: total,
+      credit: 0,
+      description: `Operating Expense: ${expense.category} - ${expense.description || expense.expenseNumber}`,
+    });
+
+    // Credit: Cash / Bank Account
+    lines.push({
+      id: `line-${expense.id}-cash`,
+      accountId: cashBankAcc.id,
+      accountNumber: cashBankAcc.accountNumber,
+      accountName: cashBankAcc.accountName,
+      accountType: cashBankAcc.type,
+      debit: 0,
+      credit: total,
+      description: `Disbursement via ${expense.paymentMethod} (${cashBankAcc.accountName})`,
+    });
+
+    return this.journalService.create({
+      entryNumber,
+      date: expense.date || new Date().toISOString(),
+      reference: expense.expenseNumber,
+      description: `Expense: ${expense.category}${expense.vendor ? ` (${expense.vendor})` : ''}`,
+      lines,
+      totalDebit: total,
+      totalCredit: total,
+      isBalanced: true,
+      sourceModule: 'expenses',
+      sourceId: expense.id,
+      sourceNumber: expense.expenseNumber,
+      status: 'posted',
+      userId,
+    }, userId);
+  }
+
+  async postPayment(
+    payment: Payment,
+    accounts: Account[],
+    userId: string = 'system'
+  ): Promise<JournalEntry | null> {
+    const amount = payment.amount || 0;
+    if (amount <= 0) return null;
+
+    const cashBankAcc = this.resolveAccount(accounts, payment.accountId, ['cash', 'bank'], '10');
+    if (!cashBankAcc) return null;
+
+    const lines: JournalLine[] = [];
+    const entryNumber = `JE-PAY-${payment.paymentNumber}`;
+
+    if (payment.partyType === 'customer' && payment.type === 'receipt') {
+      const arAcc = this.resolveAccount(accounts, undefined, ['accounts_receivable'], '1100');
+      if (!arAcc) return null;
+      lines.push({
+        id: `line-${payment.id}-in`,
+        accountId: cashBankAcc.id,
+        accountNumber: cashBankAcc.accountNumber,
+        accountName: cashBankAcc.accountName,
+        accountType: cashBankAcc.type,
+        debit: amount,
+        credit: 0,
+        description: `Customer Receipt from ${payment.partyName}`,
+      });
+      lines.push({
+        id: `line-${payment.id}-ar`,
+        accountId: arAcc.id,
+        accountNumber: arAcc.accountNumber,
+        accountName: arAcc.accountName,
+        accountType: arAcc.type,
+        debit: 0,
+        credit: amount,
+        description: `Settlement of Trade Receivable (${payment.partyName})`,
+      });
+    } else if (payment.partyType === 'supplier' && payment.type === 'payment') {
+      const apAcc = this.resolveAccount(accounts, undefined, ['accounts_payable'], '2010');
+      if (!apAcc) return null;
+      lines.push({
+        id: `line-${payment.id}-ap`,
+        accountId: apAcc.id,
+        accountNumber: apAcc.accountNumber,
+        accountName: apAcc.accountName,
+        accountType: apAcc.type,
+        debit: amount,
+        credit: 0,
+        description: `Settlement of Trade Payable (${payment.partyName})`,
+      });
+      lines.push({
+        id: `line-${payment.id}-out`,
+        accountId: cashBankAcc.id,
+        accountNumber: cashBankAcc.accountNumber,
+        accountName: cashBankAcc.accountName,
+        accountType: cashBankAcc.type,
+        debit: 0,
+        credit: amount,
+        description: `Supplier Disbursement to ${payment.partyName}`,
+      });
+    } else if (payment.partyType === 'internal_transfer') {
+      const destAcc = this.resolveAccount(accounts, payment.destinationAccountId, ['bank', 'cash'], '10');
+      if (!destAcc) return null;
+      lines.push({
+        id: `line-${payment.id}-dest`,
+        accountId: destAcc.id,
+        accountNumber: destAcc.accountNumber,
+        accountName: destAcc.accountName,
+        accountType: destAcc.type,
+        debit: amount,
+        credit: 0,
+        description: `Transfer In from ${cashBankAcc.accountName}`,
+      });
+      lines.push({
+        id: `line-${payment.id}-src`,
+        accountId: cashBankAcc.id,
+        accountNumber: cashBankAcc.accountNumber,
+        accountName: cashBankAcc.accountName,
+        accountType: cashBankAcc.type,
+        debit: 0,
+        credit: amount,
+        description: `Transfer Out to ${destAcc.accountName}`,
+      });
+    } else {
+      return null;
+    }
+
+    return this.journalService.create({
+      entryNumber,
+      date: payment.date || new Date().toISOString(),
+      reference: payment.paymentNumber,
+      description: `Treasury ${payment.type.toUpperCase()}: ${payment.partyName || payment.notes || 'Settlement'}`,
+      lines,
+      totalDebit: amount,
+      totalCredit: amount,
+      isBalanced: true,
+      sourceModule: 'payments',
+      sourceId: payment.id,
+      sourceNumber: payment.paymentNumber,
+      status: 'posted',
+      userId,
+    }, userId);
+  }
+
+  async reverseJournalByReference(
+    reference: string,
+    reason: string,
+    userId: string = 'system'
+  ): Promise<JournalEntry | null> {
+    const allEntries = await this.journalService.list({ page: 1, pageSize: 500 });
+    const target = allEntries.data.find(
+      (e) => (e.reference === reference || e.sourceNumber === reference) && e.status === 'posted'
+    );
+    if (!target) return null;
+    return this.journalService.reverseEntry(target.id, reason, userId);
+  }
 }
 
